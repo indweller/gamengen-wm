@@ -1,0 +1,15 @@
+imageio
+numpy<2.0.0
+shimmy>=2.0
+opencv-python
+pandas
+pyarrow
+Pillow
+tqdm
+torch
+datasets
+huggingface-hub
+stable-baselines3
+gym
+nes-py
+gym-super-mario-bros
