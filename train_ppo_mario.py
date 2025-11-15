@@ -171,7 +171,7 @@ def solve_env(
     eval_callback = EvalCallback(
         eval_env,
         n_eval_episodes=5,
-        eval_freq=10_000,
+        eval_freq=100_000,
         log_path=f"logs/evaluations/{scenario}",
         best_model_save_path=f"logs/models/{scenario}",
     )
@@ -228,7 +228,7 @@ if __name__ == "__main__":
     # Scenario name for logs and checkpoints
     scenario = f"mario_{env_id.replace('-', '_')}"
     
-    n_envs = max(1, multiprocessing.cpu_count() - 1)
+    n_envs = multiprocessing.cpu_count() // 2
 
     train_env = make_vec_env_mario(
         n_envs=n_envs,
@@ -248,9 +248,9 @@ if __name__ == "__main__":
 
     # PPO hyperparameters
     agent_args = {
-        "n_steps": 2048,
+        "n_steps": 128,
         "learning_rate": 2.5e-4,
-        "batch_size": 64,
+        "batch_size": 256,
         "policy_kwargs": {},
         "device": device,
         "clip_range": 0.1,
