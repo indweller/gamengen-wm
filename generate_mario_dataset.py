@@ -68,7 +68,7 @@ def save_episode_to_parquet(episode_data: dict, output_dir: str) -> None:
 
 
 def make_gif(agent, file_path: str, env_kwargs: dict, num_episodes: int = 1) -> None:
-    env = build_eval_vec_env_for_capture(**env_kwargs)
+    env = make_eval_env_mario(**env_kwargs)
     images = []
 
     for ep in range(num_episodes):
@@ -92,7 +92,7 @@ def make_gif(agent, file_path: str, env_kwargs: dict, num_episodes: int = 1) -> 
 def make_parquet_dataset(
     agent, output_dir: str, env_kwargs: dict, num_episodes: int = 1
 ) -> None:
-    env = build_eval_vec_env_for_capture(**env_kwargs)
+    env = make_eval_env_mario(**env_kwargs)
     step_global = 0
 
     for ep in tqdm(range(num_episodes), desc="Episodes"):

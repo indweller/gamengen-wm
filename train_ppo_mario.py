@@ -228,7 +228,7 @@ if __name__ == "__main__":
     # Scenario name for logs and checkpoints
     scenario = f"mario_{env_id.replace('-', '_')}"
     
-    n_envs = 4 # max(1, multiprocessing.cpu_count() - 1)
+    n_envs = max(1, multiprocessing.cpu_count() - 1)
 
     train_env = make_vec_env_mario(
         n_envs=n_envs,

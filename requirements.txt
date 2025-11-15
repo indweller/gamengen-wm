@@ -13,3 +13,4 @@ stable-baselines3
 gym
 nes-py
 gym-super-mario-bros
+tensorboard
