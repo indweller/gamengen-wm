@@ -115,7 +115,7 @@ def make_eval_env_mario(cfg) -> VecMonitor:
                 env_id=cfg["env_id"],
                 frame_size=cfg["frame_size"],
                 grayscale=cfg["grayscale"],
-                render_mode=cfg["render_mode"],
+                render_mode=cfg.get("render_mode", None),
             )
         ]
     )
