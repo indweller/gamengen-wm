@@ -1,11 +1,14 @@
 import os
-import sys
 import time
-from tqdm import tqdm
+import glob
+import re
+import warnings
+import argparse
 import multiprocessing
-from typing import Callable, Dict, Optional
+
 import torch
 import gym
+from tqdm import tqdm
 from gym.wrappers.gray_scale_observation import GrayScaleObservation
 from gym.wrappers.resize_observation import ResizeObservation
 from nes_py.wrappers import JoypadSpace
@@ -17,34 +20,57 @@ from stable_baselines3.common.vec_env import (
     DummyVecEnv,
     VecTransposeImage,
     VecFrameStack,
-    VecEnv,
     VecMonitor
 )
 from stable_baselines3.ppo import PPO
-from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
+from stable_baselines3.common.callbacks import EvalCallback, BaseCallback, CheckpointCallback
+
+warnings.filterwarnings("ignore")
 
 
-def build_mario_env(
-    env_id: str = "SuperMarioBros-1-1-v0",
-    frame_size: int = 84,
-    grayscale: bool = True,
-    render_mode: Optional[str] = None,
-):
-    """Create a single Mario environment with common wrappers (without frame stacking).
-    """
+DEFAULT_CONFIG = {
+    "env": {
+        "env_id": "SuperMarioBros-1-1-v0",
+        "frame_size": 84,
+        "grayscale": True,
+        "frame_stack": 4,
+        "n_envs": multiprocessing.cpu_count() // 2,
+    },
+
+    "ppo": {
+        "n_steps": 256,
+        "learning_rate": 2.5e-4,
+        "batch_size": 256,
+        "clip_range": 0.1,
+        "ent_coef": 0.01,
+        "vf_coef": 0.5,
+        "n_epochs": 4,
+        "gamma": 0.99,
+        "policy_kwargs": {},
+    },
+
+    "train": {
+        "total_timesteps": 10_000_000,
+        "eval_freq": 100_000,
+        "eval_episodes": 5,
+        "checkpoint_freq": 100_000,
+        "seed": 0,
+    }
+}
+
+def build_mario_env(env_id, frame_size, grayscale, render_mode=None):
     env = make_mario(env_id, render_mode=render_mode, apply_api_compatibility=True)
     env = JoypadSpace(env, SIMPLE_MOVEMENT)
-    # Remove per-env Monitor (expects gymnasium env); we'll use VecMonitor instead on vector env.
+
     if grayscale:
-        env = GrayScaleObservation(env, keep_dim=True)  # type: ignore[arg-type]
-    env = ResizeObservation(env, shape=frame_size)  # type: ignore[arg-type]
+        env = GrayScaleObservation(env, keep_dim=True)
+    env = ResizeObservation(env, shape=frame_size)
 
     # Final wrapper: adapt legacy gym reset signature to the (obs, info) tuple
     # expected by SB3's subprocess worker when it passes seed/options. We place
     # it last so earlier observation-transforming wrappers receive a raw array.
     class ResetCompatibilityWrapper(gym.Wrapper):
-        def reset(self, seed=None, options=None, **kwargs):  # type: ignore[override]
-            # Best-effort seeding for legacy envs
+        def reset(self, seed=None, options=None, **kwargs):
             if seed is not None:
                 _seed_fn = getattr(self.env, 'seed', None)
                 if callable(_seed_fn):
@@ -53,64 +79,45 @@ def build_mario_env(
                     except Exception:
                         pass
             result = self.env.reset()
-            # If underlying env already gives (obs, info) forward directly
             if isinstance(result, tuple) and len(result) == 2:
-                obs, info = result
-            else:
-                obs, info = result, {}
-            return obs, info
-    env = ResetCompatibilityWrapper(env)
-    return env
+                return result
+            return result, {}
+
+    return ResetCompatibilityWrapper(env)
 
 
-def make_vec_env_mario(
-    n_envs: int,
-    env_id: str = "SuperMarioBros-1-1-v0",
-    frame_size: int = 84,
-    grayscale: bool = True,
-    frame_stack: int = 4,
-    render_mode: Optional[str] = None,
-) -> VecEnv:
-    """Create a vectorized Mario environment suitable for SB3 CNN policies.
-
-    Order: SubprocVecEnv -> VecTransposeImage (channel-last to channel-first) -> VecFrameStack
-    """
-
-    def _factory() -> Callable[[], gym.Env]:
+def make_vec_env_mario(cfg) -> VecMonitor:
+    """Vectorized env from config."""
+    def _factory():
         return lambda: build_mario_env(
-            env_id=env_id,
-            frame_size=frame_size,
-            grayscale=grayscale,
-            render_mode=render_mode,
+            env_id=cfg["env_id"],
+            frame_size=cfg["frame_size"],
+            grayscale=cfg["grayscale"],
+            render_mode=cfg.get("render_mode", None),
         )
 
-    vec_env = SubprocVecEnv([_factory() for _ in range(n_envs)])  # type: ignore[arg-type]
-    vec_env = VecMonitor(vec_env)
-    vec_env = VecTransposeImage(vec_env)  # now channels-first single frame
-    vec_env = VecFrameStack(vec_env, n_stack=frame_stack, channels_order="first")
-    return vec_env
+    vec = SubprocVecEnv([_factory() for _ in range(cfg["n_envs"])])
+    vec = VecMonitor(vec)
+    vec = VecTransposeImage(vec)
+    vec = VecFrameStack(vec, n_stack=cfg["frame_stack"], channels_order="first")
+    return vec
 
 
-def make_eval_env_mario(
-    env_id: str = "SuperMarioBros-1-1-v0",
-    frame_size: int = 84,
-    grayscale: bool = True,
-    frame_stack: int = 4,
-    render_mode: Optional[str] = None,
-) -> VecEnv:
-    """Single-process evaluation environment mirroring training preprocessing."""
-    eval_env = DummyVecEnv([
+def make_eval_env_mario(cfg) -> VecMonitor:
+    """Single env for evaluation."""
+    env = DummyVecEnv([
         lambda: build_mario_env(
-            env_id=env_id,
-            frame_size=frame_size,
-            grayscale=grayscale,
-            render_mode=render_mode,
-        )  # type: ignore[arg-type]
-    ])  # type: ignore[arg-type]
-    eval_env = VecMonitor(eval_env)
-    eval_env = VecTransposeImage(eval_env)
-    eval_env = VecFrameStack(eval_env, n_stack=frame_stack, channels_order="first")
-    return eval_env
+            env_id=cfg["env_id"],
+            frame_size=cfg["frame_size"],
+            grayscale=cfg["grayscale"],
+            render_mode=cfg.get("eval_render_mode", None),
+        )
+    ])
+    env = VecMonitor(env)
+    env = VecTransposeImage(env)
+    env = VecFrameStack(env, n_stack=cfg["frame_stack"], channels_order="first")
+    return env
+
 
 class ProgressBarCallback(BaseCallback):
     def __init__(self, pbar):
@@ -120,74 +127,75 @@ class ProgressBarCallback(BaseCallback):
         self.last_timesteps = 0
 
     def _on_step(self):
-        current_timesteps = self.num_timesteps - self.last_timesteps
-        self.pbar.update(current_timesteps)
+        current = self.num_timesteps - self.last_timesteps
+        self.pbar.update(current)
         self.last_timesteps = self.num_timesteps
 
-        current_time = time.time()
-        steps_per_second = current_timesteps / (current_time - self.last_time)
+        now = time.time()
+        steps_per_second = current / (now - self.last_time)
         self.pbar.set_postfix({"steps/s": f"{steps_per_second:.2f}"})
-        self.last_time = current_time
-
+        self.last_time = now
         return True
 
     def on_training_end(self):
         self.pbar.close()
 
-def solve_env(
-    env: VecEnv,
-    eval_env: VecEnv,
-    scenario: str,
-    agent_args: Dict,
-    resume: bool = False,
-    load_path: Optional[str] = None,
-):
+
+def solve_env(env, eval_env, scenario, config, resume=False, load_path=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    if resume:
-        # Load the existing model
-        if load_path:
-            agent = PPO.load(
-                load_path, env=env, tensorboard_log="logs/tensorboard", **agent_args
-            )
-            print(f"Resumed training from {load_path}")
-        else:
-            print("Resume selected but no valid path provided")
-            sys.exit()
+    ppo_args = {**config["ppo"], "device": device}
+
+    # Load or create PPO
+    if resume and load_path:
+        agent = PPO.load(
+            load_path,
+            env=env,
+            tensorboard_log="logs/tensorboard",
+            **ppo_args
+        )
+        print(f"Resumed training from {load_path}")
     else:
-        # Create a new agent
         agent = PPO(
             "CnnPolicy",
             env,
             tensorboard_log="logs/tensorboard",
-            seed=0,
-            **agent_args,
+            seed=config["train"]["seed"],
+            **ppo_args
         )
-        # init_model(agent)
 
     agent.policy.to(device)
 
-    # Create callbacks.
+    # Callbacks from config
     eval_callback = EvalCallback(
         eval_env,
-        n_eval_episodes=5,
-        eval_freq=100_000,
+        n_eval_episodes=config["train"]["eval_episodes"],
+        eval_freq=config["train"]["eval_freq"],
         log_path=f"logs/evaluations/{scenario}",
         best_model_save_path=f"logs/models/{scenario}",
     )
 
-    # Set up progress bar
-    total_timesteps = 10_000_000
-    pbar = tqdm(total=total_timesteps, desc="Training Progress")
+    os.makedirs(f"logs/checkpoints/{scenario}", exist_ok=True)
+    checkpoint_callback = CheckpointCallback(
+        save_freq=config["train"]["checkpoint_freq"],
+        save_path=f"logs/checkpoints/{scenario}",
+        name_prefix="rl_model",
+        save_replay_buffer=False,
+        save_vecnormalize=False,
+    )
+
+    pbar = tqdm(total=config["train"]["total_timesteps"], desc="Training Progress")
     progress_callback = ProgressBarCallback(pbar)
 
-    # Start the training process.
+    total_ts = config["train"]["total_timesteps"]
+    remaining = total_ts - agent.num_timesteps if resume else total_ts
+
     try:
         agent.learn(
-            total_timesteps=10_000_000,
+            total_timesteps=remaining,
             tb_log_name=scenario,
-            callback=[eval_callback, progress_callback],
-            reset_num_timesteps=not resume,  # Don't reset timesteps if resuming
+            callback=[eval_callback, checkpoint_callback, progress_callback],
+            reset_num_timesteps=not resume,
         )
     finally:
         pbar.close()
@@ -196,76 +204,90 @@ def solve_env(
 
     return agent
 
+def _find_latest_checkpoint(scenario):
+    ckpt_dir = f"logs/checkpoints/{scenario}"
+    pattern = re.compile(r"rl_model_(\d+)_steps\.zip$")
 
-def save_model(agent: PPO, scenario: str):
-    """Save the trained model."""
-    save_path = f"logs/models/{scenario}/final_model"
-    if not os.path.exists(os.path.dirname(save_path)):
-        os.makedirs(os.path.dirname(save_path))
-    agent.save(save_path)
-    print(f"Model saved to {save_path}")
+    candidates = []
+    if os.path.isdir(ckpt_dir):
+        for path in glob.glob(os.path.join(ckpt_dir, "*.zip")):
+            m = pattern.search(os.path.basename(path))
+            if m:
+                candidates.append((int(m.group(1)), path))
 
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return candidates[0][1]
 
-def load_model(load_path: str, env: VecEnv) -> PPO:
-    """Load a trained model."""
-    if not os.path.exists(os.path.dirname(load_path)):
-        os.makedirs(os.path.dirname(load_path))
-    agent = PPO.load(load_path, env=env)
-    print(f"Model loaded from {load_path}")
-    return agent
+    best = f"logs/models/{scenario}/best_model.zip"
+    final = f"logs/models/{scenario}/final_model.zip"
+    return best if os.path.exists(best) else final if os.path.exists(final) else None
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+
+    # --- env arguments
+    parser.add_argument("--env_id", type=str, default=DEFAULT_CONFIG["env"]["env_id"])
+    parser.add_argument("--frame_size", type=int, default=DEFAULT_CONFIG["env"]["frame_size"])
+    parser.add_argument("--grayscale", type=int, default=int(DEFAULT_CONFIG["env"]["grayscale"]))
+    parser.add_argument("--frame_stack", type=int, default=DEFAULT_CONFIG["env"]["frame_stack"])
+    parser.add_argument("--n_envs", type=int, default=DEFAULT_CONFIG["env"]["n_envs"])
+
+    # --- train arguments
+    parser.add_argument("--total_timesteps", type=int, default=DEFAULT_CONFIG["train"]["total_timesteps"])
+    parser.add_argument("--eval_freq", type=int, default=DEFAULT_CONFIG["train"]["eval_freq"])
+    parser.add_argument("--eval_episodes", type=int, default=DEFAULT_CONFIG["train"]["eval_episodes"])
+    parser.add_argument("--checkpoint_freq", type=int, default=DEFAULT_CONFIG["train"]["checkpoint_freq"])
+    parser.add_argument("--seed", type=int, default=DEFAULT_CONFIG["train"]["seed"])
+    parser.add_argument("--force_fresh", action="store_true")
+
+    args = parser.parse_args()
+
+    # Build config by merging argparse → defaults
+    CONFIG = DEFAULT_CONFIG.copy()
+    CONFIG["env"] = {
+        "env_id": args.env_id,
+        "frame_size": args.frame_size,
+        "grayscale": bool(args.grayscale),
+        "frame_stack": args.frame_stack,
+        "n_envs": args.n_envs,
+    }
+    CONFIG["train"]["total_timesteps"] = args.total_timesteps
+    CONFIG["train"]["eval_freq"] = args.eval_freq
+    CONFIG["train"]["eval_episodes"] = args.eval_episodes
+    CONFIG["train"]["checkpoint_freq"] = args.checkpoint_freq
+    CONFIG["train"]["seed"] = args.seed
+    print("Configuration:")
+    for section, params in CONFIG.items():
+        print(f"  {section}:")
+        for k, v in params.items():
+            print(f"    {k}: {v}")
+    env_cfg = CONFIG["env"]
+    scenario = f"mario_{env_cfg['env_id'].replace('-', '_')}"
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Environment configuration
-    env_id = os.environ.get("MARIO_ENV_ID", "SuperMarioBros-1-1-v0")
-    frame_size = int(os.environ.get("MARIO_FRAME_SIZE", 84))
-    grayscale = bool(int(os.environ.get("MARIO_GRAYSCALE", 1)))
-    frame_stack = int(os.environ.get("MARIO_FRAME_STACK", 4))
+    # Build envs
+    train_env = make_vec_env_mario(env_cfg)
+    eval_env = make_eval_env_mario(env_cfg)
 
-    # Scenario name for logs and checkpoints
-    scenario = f"mario_{env_id.replace('-', '_')}"
-    
-    n_envs = multiprocessing.cpu_count() // 2
+    resume_path = None if args.force_fresh else _find_latest_checkpoint(scenario)
+    resume_flag = resume_path is not None
 
-    train_env = make_vec_env_mario(
-        n_envs=n_envs,
-        env_id=env_id,
-        frame_size=frame_size,
-        grayscale=grayscale,
-        frame_stack=frame_stack,
-        render_mode=None,
-    )
-    eval_env = make_eval_env_mario(
-        env_id=env_id,
-        frame_size=frame_size,
-        grayscale=grayscale,
-        frame_stack=frame_stack,
-        render_mode=None,
-    )
-
-    # PPO hyperparameters
-    agent_args = {
-        "n_steps": 128,
-        "learning_rate": 2.5e-4,
-        "batch_size": 256,
-        "policy_kwargs": {},
-        "device": device,
-        "clip_range": 0.1,
-        "ent_coef": 0.01,
-        "vf_coef": 0.5,
-        "n_epochs": 4,
-        "gamma": 0.99,
-    }
+    if resume_flag:
+        print(f"Resuming from checkpoint: {resume_path}")
 
     agent = solve_env(
         train_env,
         eval_env,
         scenario,
-        agent_args,
-        resume=False,
+        CONFIG,
+        resume=resume_flag,
+        load_path=resume_path,
     )
 
-    save_model(agent, scenario)
+    os.makedirs(f"logs/models/{scenario}", exist_ok=True)
+    agent.save(f"logs/models/{scenario}/final_model")
+    print(f"Model saved to logs/models/{scenario}/final_model")
