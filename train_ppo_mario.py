@@ -20,10 +20,14 @@ from stable_baselines3.common.vec_env import (
     DummyVecEnv,
     VecTransposeImage,
     VecFrameStack,
-    VecMonitor
+    VecMonitor,
 )
 from stable_baselines3.ppo import PPO
-from stable_baselines3.common.callbacks import EvalCallback, BaseCallback, CheckpointCallback
+from stable_baselines3.common.callbacks import (
+    EvalCallback,
+    BaseCallback,
+    CheckpointCallback,
+)
 
 warnings.filterwarnings("ignore")
 
@@ -36,7 +40,6 @@ DEFAULT_CONFIG = {
         "frame_stack": 4,
         "n_envs": multiprocessing.cpu_count() // 2,
     },
-
     "ppo": {
         "n_steps": 256,
         "learning_rate": 2.5e-4,
@@ -48,15 +51,15 @@ DEFAULT_CONFIG = {
         "gamma": 0.99,
         "policy_kwargs": {},
     },
-
     "train": {
         "total_timesteps": 10_000_000,
         "eval_freq": 100_000,
         "eval_episodes": 5,
         "checkpoint_freq": 100_000,
         "seed": 0,
-    }
+    },
 }
+
 
 def build_mario_env(env_id, frame_size, grayscale, render_mode=None):
     env = make_mario(env_id, render_mode=render_mode, apply_api_compatibility=True)
@@ -72,7 +75,7 @@ def build_mario_env(env_id, frame_size, grayscale, render_mode=None):
     class ResetCompatibilityWrapper(gym.Wrapper):
         def reset(self, seed=None, options=None, **kwargs):
             if seed is not None:
-                _seed_fn = getattr(self.env, 'seed', None)
+                _seed_fn = getattr(self.env, "seed", None)
                 if callable(_seed_fn):
                     try:
                         _seed_fn(seed)
@@ -88,6 +91,7 @@ def build_mario_env(env_id, frame_size, grayscale, render_mode=None):
 
 def make_vec_env_mario(cfg) -> VecMonitor:
     """Vectorized env from config."""
+
     def _factory():
         return lambda: build_mario_env(
             env_id=cfg["env_id"],
@@ -105,14 +109,16 @@ def make_vec_env_mario(cfg) -> VecMonitor:
 
 def make_eval_env_mario(cfg) -> VecMonitor:
     """Single env for evaluation."""
-    env = DummyVecEnv([
-        lambda: build_mario_env(
-            env_id=cfg["env_id"],
-            frame_size=cfg["frame_size"],
-            grayscale=cfg["grayscale"],
-            render_mode=cfg.get("eval_render_mode", None),
-        )
-    ])
+    env = DummyVecEnv(
+        [
+            lambda: build_mario_env(
+                env_id=cfg["env_id"],
+                frame_size=cfg["frame_size"],
+                grayscale=cfg["grayscale"],
+                render_mode=cfg["render_mode"],
+            )
+        ]
+    )
     env = VecMonitor(env)
     env = VecTransposeImage(env)
     env = VecFrameStack(env, n_stack=cfg["frame_stack"], channels_order="first")
@@ -149,10 +155,7 @@ def solve_env(env, eval_env, scenario, config, resume=False, load_path=None):
     # Load or create PPO
     if resume and load_path:
         agent = PPO.load(
-            load_path,
-            env=env,
-            tensorboard_log="logs/tensorboard",
-            **ppo_args
+            load_path, env=env, tensorboard_log="logs/tensorboard", **ppo_args
         )
         print(f"Resumed training from {load_path}")
     else:
@@ -161,7 +164,7 @@ def solve_env(env, eval_env, scenario, config, resume=False, load_path=None):
             env,
             tensorboard_log="logs/tensorboard",
             seed=config["train"]["seed"],
-            **ppo_args
+            **ppo_args,
         )
 
     agent.policy.to(device)
@@ -204,6 +207,7 @@ def solve_env(env, eval_env, scenario, config, resume=False, load_path=None):
 
     return agent
 
+
 def _find_latest_checkpoint(scenario):
     ckpt_dir = f"logs/checkpoints/{scenario}"
     pattern = re.compile(r"rl_model_(\d+)_steps\.zip$")
@@ -229,16 +233,34 @@ if __name__ == "__main__":
 
     # --- env arguments
     parser.add_argument("--env_id", type=str, default=DEFAULT_CONFIG["env"]["env_id"])
-    parser.add_argument("--frame_size", type=int, default=DEFAULT_CONFIG["env"]["frame_size"])
-    parser.add_argument("--grayscale", type=int, default=int(DEFAULT_CONFIG["env"]["grayscale"]))
-    parser.add_argument("--frame_stack", type=int, default=DEFAULT_CONFIG["env"]["frame_stack"])
+    parser.add_argument(
+        "--frame_size", type=int, default=DEFAULT_CONFIG["env"]["frame_size"]
+    )
+    parser.add_argument(
+        "--grayscale", type=int, default=int(DEFAULT_CONFIG["env"]["grayscale"])
+    )
+    parser.add_argument(
+        "--frame_stack", type=int, default=DEFAULT_CONFIG["env"]["frame_stack"]
+    )
     parser.add_argument("--n_envs", type=int, default=DEFAULT_CONFIG["env"]["n_envs"])
 
     # --- train arguments
-    parser.add_argument("--total_timesteps", type=int, default=DEFAULT_CONFIG["train"]["total_timesteps"])
-    parser.add_argument("--eval_freq", type=int, default=DEFAULT_CONFIG["train"]["eval_freq"])
-    parser.add_argument("--eval_episodes", type=int, default=DEFAULT_CONFIG["train"]["eval_episodes"])
-    parser.add_argument("--checkpoint_freq", type=int, default=DEFAULT_CONFIG["train"]["checkpoint_freq"])
+    parser.add_argument(
+        "--total_timesteps",
+        type=int,
+        default=DEFAULT_CONFIG["train"]["total_timesteps"],
+    )
+    parser.add_argument(
+        "--eval_freq", type=int, default=DEFAULT_CONFIG["train"]["eval_freq"]
+    )
+    parser.add_argument(
+        "--eval_episodes", type=int, default=DEFAULT_CONFIG["train"]["eval_episodes"]
+    )
+    parser.add_argument(
+        "--checkpoint_freq",
+        type=int,
+        default=DEFAULT_CONFIG["train"]["checkpoint_freq"],
+    )
     parser.add_argument("--seed", type=int, default=DEFAULT_CONFIG["train"]["seed"])
     parser.add_argument("--force_fresh", action="store_true")
 
