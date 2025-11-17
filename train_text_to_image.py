@@ -1037,10 +1037,13 @@ def main():
                                         for i, target_img in enumerate(target_images)
                                     ],
                                     "3_context_images": [
-                                        wandb.Image(
-                                            context_img, caption=f"Context Image {i}"
-                                        )
-                                        for i, context_img in enumerate(context_images)
+                                        #wandb.Image(
+                                        #    context_img, caption=f"Context Image {i}"
+                                        #)
+                                        #for i, context_img in enumerate(context_images)
+                                        wandb.Image(context_img[j], caption=f"Context {i}, Frame {j}")
+                                            for i, context_img in enumerate(context_images)
+                                            for j in range(context_img.shape[0])
                                     ],
                                 },
                                 step=global_step,
