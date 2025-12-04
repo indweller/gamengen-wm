@@ -5,6 +5,7 @@ import re
 import warnings
 import argparse
 import multiprocessing
+import datetime
 import wandb
 import torch
 import gym
@@ -65,6 +66,7 @@ DEFAULT_CONFIG = {
         "group": "experiment-1",
         "name": "ppo-mario-run",
         "log_interval": 10,
+        "enable": True
     }
 }
 
@@ -178,19 +180,27 @@ def solve_env(env, eval_env, config, resume=False, load_path=None, wandb_id=None
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ppo_args = {**config["ppo"], "device": device}
 
-    run = wandb.init(
-        project=config["wandb"]["project"],
-        group=config["wandb"]["group"],
-        name=config["wandb"]["name"],
-        id=wandb_id,  # Use passed wandb_id for resume
-        resume="allow" if wandb_id else None,
-        config=config,
-        sync_tensorboard=True,
-    )
-    print(f"W&B run initialized: {run.url}")
-    print(f"W&B run ID: {run.id}")
+    run = None
+    if config["wandb"]["enable"]:
+        run = wandb.init(
+            project=config["wandb"]["project"],
+            group=config["wandb"]["group"],
+            name=config["wandb"]["name"],
+            id=wandb_id,  # Use passed wandb_id for resume
+            resume="allow" if wandb_id else None,
+            config=config,
+            sync_tensorboard=True,
+        )
+        print(f"W&B run initialized: {run.url}")
+        print(f"W&B run ID: {run.id}")
     
-    scenario = f"mario_{run.id}"
+    # Use W&B run ID as scenario name, or fall back to timestamp
+    if run:
+        scenario = f"mario_{run.id}"
+    else:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        scenario = f"mario_{timestamp}"
+    
     print(f"Scenario directory: {scenario}")
 
     # Load or create PPO
@@ -232,15 +242,16 @@ def solve_env(env, eval_env, config, resume=False, load_path=None, wandb_id=None
     progress_callback = ProgressBarCallback(pbar)
 
     callbacks = [eval_callback, checkpoint_callback, progress_callback]
-    
-    wandb_callback = WandbCallback(
-        model_save_path=None,
-        verbose=2,
-        gradient_save_freq=0,
-        model_save_freq=0,
-        log="all",
-    )
-    callbacks.append(wandb_callback)
+
+    if config["wandb"]["enable"]:    
+        wandb_callback = WandbCallback(
+            model_save_path=None,
+            verbose=2,
+            gradient_save_freq=0,
+            model_save_freq=0,
+            log="all",
+        )
+        callbacks.append(wandb_callback)
 
     total_ts = config["train"]["total_timesteps"]
     remaining = total_ts - agent.num_timesteps if resume else total_ts
@@ -263,7 +274,8 @@ def solve_env(env, eval_env, config, resume=False, load_path=None, wandb_id=None
         agent.save(final_path)
         print(f"Final model saved to {final_path}")
         
-        wandb.finish()
+        if config["wandb"]["enable"]:
+            wandb.finish()
 
     return agent
 
@@ -350,6 +362,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--seed", type=int, default=DEFAULT_CONFIG["train"]["seed"])
     parser.add_argument("--force_fresh", action="store_true")
+    parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging")
     parser.add_argument("--resume_id", type=str, default=None, help="W&B run ID to resume from")
 
     args = parser.parse_args()
@@ -370,6 +383,9 @@ if __name__ == "__main__":
     CONFIG["train"]["eval_episodes"] = args.eval_episodes
     CONFIG["train"]["checkpoint_freq"] = args.checkpoint_freq
     CONFIG["train"]["seed"] = args.seed
+
+    if args.no_wandb:
+        CONFIG["wandb"]["enable"] = False
 
     env_cfg = CONFIG["env"]
     train_cfg = CONFIG["train"]
@@ -393,7 +409,7 @@ if __name__ == "__main__":
     if not args.force_fresh:
         if wandb_id:
             resume_path, _ = _find_latest_checkpoint(wandb_id)
-        else:
+        elif CONFIG["wandb"]["enable"]:
             available_runs = _find_all_wandb_runs()
             if available_runs:
                 print(f"\nFound {len(available_runs)} previous run(s). Use --resume_id <ID> to resume.")
