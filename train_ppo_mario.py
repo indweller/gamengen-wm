@@ -174,36 +174,36 @@ class ProgressBarCallback(BaseCallback):
         self.pbar.close()
 
 
-def solve_env(env, eval_env, scenario, config, resume=False, load_path=None):
+def solve_env(env, eval_env, config, resume=False, load_path=None, wandb_id=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ppo_args = {**config["ppo"], "device": device}
 
-    wandb_id = None
-    if resume:
-        ckpt_wandb_id = getattr(load_path, "wandb_id", None)
-        wandb_id = ckpt_wandb_id
-    
     run = wandb.init(
         project=config["wandb"]["project"],
         group=config["wandb"]["group"],
         name=config["wandb"]["name"],
-        id=wandb_id,
-        resume="must" if resume else None,
+        id=wandb_id,  # Use passed wandb_id for resume
+        resume="allow" if wandb_id else None,
         config=config,
         sync_tensorboard=True,
     )
+    print(f"W&B run initialized: {run.url}")
+    print(f"W&B run ID: {run.id}")
+    
+    scenario = f"mario_{run.id}"
+    print(f"Scenario directory: {scenario}")
 
     # Load or create PPO
     if resume and load_path:
         agent = PPO.load(
-            load_path, env=env, tensorboard_log=f"logs/tensorboard/{run.id}", **ppo_args
+            load_path, env=env, tensorboard_log="logs/tensorboard", **ppo_args
         )
         print(f"Resumed training from {load_path}")
     else:
         agent = PPO(
             "CnnPolicy",
             env,
-            tensorboard_log=f"logs/tensorboard/{run.id}",
+            tensorboard_log="logs/tensorboard",
             seed=config["train"]["seed"],
             **ppo_args,
         )
@@ -234,10 +234,10 @@ def solve_env(env, eval_env, scenario, config, resume=False, load_path=None):
     callbacks = [eval_callback, checkpoint_callback, progress_callback]
     
     wandb_callback = WandbCallback(
-        model_save_path=f"logs/checkpoints/{scenario}/wandb_models",
+        model_save_path=None,
         verbose=2,
         gradient_save_freq=0,
-        model_save_freq=config["train"]["checkpoint_freq"],
+        model_save_freq=0,
         log="all",
     )
     callbacks.append(wandb_callback)
@@ -256,12 +256,24 @@ def solve_env(env, eval_env, scenario, config, resume=False, load_path=None):
         pbar.close()
         env.close()
         eval_env.close()
+        
+        # Save final model
+        final_path = f"logs/models/{scenario}/final_model"
+        os.makedirs(os.path.dirname(final_path), exist_ok=True)
+        agent.save(final_path)
+        print(f"Final model saved to {final_path}")
+        
         wandb.finish()
 
     return agent
 
 
-def _find_latest_checkpoint(scenario):
+def _find_latest_checkpoint(wandb_id=None):
+    """Find latest checkpoint for a given W&B run ID."""
+    if not wandb_id:
+        return None, None
+    
+    scenario = f"mario_{wandb_id}"
     ckpt_dir = f"logs/checkpoints/{scenario}"
     pattern = re.compile(r"rl_model_(\d+)_steps\.zip$")
     candidates = []
@@ -272,13 +284,33 @@ def _find_latest_checkpoint(scenario):
             if m:
                 candidates.append((int(m.group(1)), path))
 
+    checkpoint_path = None
     if candidates:
         candidates.sort(key=lambda x: x[0], reverse=True)
-        return candidates[0][1]
+        checkpoint_path = candidates[0][1]
+    else:
+        best = f"logs/models/{scenario}/best_model.zip"
+        final = f"logs/models/{scenario}/final_model.zip"
+        if os.path.exists(best):
+            checkpoint_path = best
+        elif os.path.exists(final):
+            checkpoint_path = final
+    
+    return checkpoint_path, wandb_id
 
-    best = f"logs/models/{scenario}/best_model.zip"
-    final = f"logs/models/{scenario}/final_model.zip"
-    return best if os.path.exists(best) else final if os.path.exists(final) else None
+
+def _find_all_wandb_runs():
+    """Find all W&B run IDs that have been used."""
+    runs = []
+    checkpoint_dir = "logs/checkpoints"
+    
+    if os.path.isdir(checkpoint_dir):
+        for entry in os.listdir(checkpoint_dir):
+            if entry.startswith("mario_"):
+                wandb_id = entry.replace("mario_", "")
+                runs.append(wandb_id)
+    
+    return runs
 
 
 if __name__ == "__main__":
@@ -318,6 +350,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--seed", type=int, default=DEFAULT_CONFIG["train"]["seed"])
     parser.add_argument("--force_fresh", action="store_true")
+    parser.add_argument("--resume_id", type=str, default=None, help="W&B run ID to resume from")
 
     args = parser.parse_args()
 
@@ -337,36 +370,52 @@ if __name__ == "__main__":
     CONFIG["train"]["eval_episodes"] = args.eval_episodes
     CONFIG["train"]["checkpoint_freq"] = args.checkpoint_freq
     CONFIG["train"]["seed"] = args.seed
+
+    env_cfg = CONFIG["env"]
+    train_cfg = CONFIG["train"]
+    ppo_cfg = CONFIG["ppo"]
+
     print("Configuration:")
     for section, params in CONFIG.items():
         print(f"  {section}:")
         for k, v in params.items():
             print(f"    {k}: {v}")
-    env_cfg = CONFIG["env"]
-    scenario = f"mario_{env_cfg['env_id'].replace('-', '_')}"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Build envs
     train_env = make_vec_env_mario(env_cfg)
     eval_env = make_eval_env_mario(env_cfg)
 
-    resume_path = None if args.force_fresh else _find_latest_checkpoint(scenario)
+    wandb_id = args.resume_id 
+    resume_path = None
+    
+    if not args.force_fresh:
+        if wandb_id:
+            resume_path, _ = _find_latest_checkpoint(wandb_id)
+        else:
+            available_runs = _find_all_wandb_runs()
+            if available_runs:
+                print(f"\nFound {len(available_runs)} previous run(s). Use --resume_id <ID> to resume.")
+                print("Available run IDs:")
+                for run_id in available_runs[:10]:
+                    print(f"  - {run_id}")
+    
     resume_flag = resume_path is not None
 
     if resume_flag:
-        print(f"Resuming from checkpoint: {resume_path}")
+        print(f"\nResuming from checkpoint: {resume_path}")
+        print(f"Resuming W&B run: {wandb_id}")
+    else:
+        print("\nStarting fresh training run...")
 
     agent = solve_env(
         train_env,
         eval_env,
-        scenario,
         CONFIG,
         resume=resume_flag,
         load_path=resume_path,
+        wandb_id=wandb_id,
     )
 
-    os.makedirs(f"logs/models/{scenario}", exist_ok=True)
-    agent.save(f"logs/models/{scenario}/final_model")
-    print(f"Model saved to logs/models/{scenario}/final_model")
+    print(f"\nTraining complete!")
