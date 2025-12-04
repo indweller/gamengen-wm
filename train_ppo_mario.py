@@ -40,7 +40,7 @@ DEFAULT_CONFIG = {
         "grayscale": True,
         "frame_stack": 4,
         "skip": 4,
-        "n_envs": multiprocessing.cpu_count() // 2,
+        "n_envs": multiprocessing.cpu_count() - 2,
     },
     "ppo": {
         "n_steps": 256,
