@@ -303,6 +303,8 @@ if __name__ == "__main__":
         type=int,
         default=DEFAULT_CONFIG["train"]["total_timesteps"],
     )
+    parser.add_argument("--n_steps", type=int, default=DEFAULT_CONFIG["ppo"]["n_steps"])
+    parser.add_argument("--batch_size", type=int, default=DEFAULT_CONFIG["ppo"]["batch_size"])
     parser.add_argument(
         "--eval_freq", type=int, default=DEFAULT_CONFIG["train"]["eval_freq"]
     )
@@ -329,6 +331,8 @@ if __name__ == "__main__":
         "n_envs": args.n_envs,
     }
     CONFIG["train"]["total_timesteps"] = args.total_timesteps
+    CONFIG["ppo"]["n_steps"] = args.n_steps
+    CONFIG["ppo"]["batch_size"] = args.batch_size
     CONFIG["train"]["eval_freq"] = args.eval_freq
     CONFIG["train"]["eval_episodes"] = args.eval_episodes
     CONFIG["train"]["checkpoint_freq"] = args.checkpoint_freq
