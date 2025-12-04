@@ -5,7 +5,7 @@ import re
 import warnings
 import argparse
 import multiprocessing
-
+import wandb
 import torch
 import gym
 from tqdm import tqdm
@@ -28,6 +28,7 @@ from stable_baselines3.common.callbacks import (
     BaseCallback,
     CheckpointCallback,
 )
+from wandb.integration.sb3 import WandbCallback
 
 warnings.filterwarnings("ignore")
 
@@ -38,6 +39,7 @@ DEFAULT_CONFIG = {
         "frame_size": 84,
         "grayscale": True,
         "frame_stack": 4,
+        "skip": 4,
         "n_envs": multiprocessing.cpu_count() // 2,
     },
     "ppo": {
@@ -58,13 +60,37 @@ DEFAULT_CONFIG = {
         "checkpoint_freq": 100_000,
         "seed": 0,
     },
+    "wandb": {
+        "project": "mario-ppo",
+        "group": "experiment-1",
+        "name": "ppo-mario-run",
+        "log_interval": 10,
+    }
 }
 
 
-def build_mario_env(env_id, frame_size, grayscale, render_mode=None):
+class FrameSkip(gym.Wrapper):
+    def __init__(self, env, skip=4):
+        super().__init__(env)
+        self.skip = skip
+
+    def step(self, action):
+        total_reward = 0.0
+        terminated = False
+        truncated = False
+        info = {}
+        for _ in range(self.skip):
+            obs, reward, terminated, truncated, info = self.env.step(action)
+            total_reward += reward
+            if terminated or truncated:
+                break
+        return obs, total_reward, terminated, truncated, info
+
+
+def build_mario_env(env_id, frame_size, grayscale, skip=4, render_mode=None):
     env = make_mario(env_id, render_mode=render_mode, apply_api_compatibility=True)
     env = JoypadSpace(env, SIMPLE_MOVEMENT)
-
+    env = FrameSkip(env, skip=skip)
     if grayscale:
         env = GrayScaleObservation(env, keep_dim=True)
     env = ResizeObservation(env, shape=frame_size)
@@ -97,6 +123,7 @@ def make_vec_env_mario(cfg) -> VecMonitor:
             env_id=cfg["env_id"],
             frame_size=cfg["frame_size"],
             grayscale=cfg["grayscale"],
+            skip=cfg.get("skip", 4),
             render_mode=cfg.get("render_mode", None),
         )
 
@@ -149,20 +176,34 @@ class ProgressBarCallback(BaseCallback):
 
 def solve_env(env, eval_env, scenario, config, resume=False, load_path=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     ppo_args = {**config["ppo"], "device": device}
+
+    wandb_id = None
+    if resume:
+        ckpt_wandb_id = getattr(load_path, "wandb_id", None)
+        wandb_id = ckpt_wandb_id
+    
+    run = wandb.init(
+        project=config["wandb"]["project"],
+        group=config["wandb"]["group"],
+        name=config["wandb"]["name"],
+        id=wandb_id,
+        resume="must" if resume else None,
+        config=config,
+        sync_tensorboard=True,
+    )
 
     # Load or create PPO
     if resume and load_path:
         agent = PPO.load(
-            load_path, env=env, tensorboard_log="logs/tensorboard", **ppo_args
+            load_path, env=env, tensorboard_log=f"logs/tensorboard/{run.id}", **ppo_args
         )
         print(f"Resumed training from {load_path}")
     else:
         agent = PPO(
             "CnnPolicy",
             env,
-            tensorboard_log="logs/tensorboard",
+            tensorboard_log=f"logs/tensorboard/{run.id}",
             seed=config["train"]["seed"],
             **ppo_args,
         )
@@ -190,6 +231,17 @@ def solve_env(env, eval_env, scenario, config, resume=False, load_path=None):
     pbar = tqdm(total=config["train"]["total_timesteps"], desc="Training Progress")
     progress_callback = ProgressBarCallback(pbar)
 
+    callbacks = [eval_callback, checkpoint_callback, progress_callback]
+    
+    wandb_callback = WandbCallback(
+        model_save_path=f"logs/checkpoints/{scenario}/wandb_models",
+        verbose=2,
+        gradient_save_freq=0,
+        model_save_freq=config["train"]["checkpoint_freq"],
+        log="all",
+    )
+    callbacks.append(wandb_callback)
+
     total_ts = config["train"]["total_timesteps"]
     remaining = total_ts - agent.num_timesteps if resume else total_ts
 
@@ -197,13 +249,14 @@ def solve_env(env, eval_env, scenario, config, resume=False, load_path=None):
         agent.learn(
             total_timesteps=remaining,
             tb_log_name=scenario,
-            callback=[eval_callback, checkpoint_callback, progress_callback],
+            callback=callbacks,
             reset_num_timesteps=not resume,
         )
     finally:
         pbar.close()
         env.close()
         eval_env.close()
+        wandb.finish()
 
     return agent
 
@@ -211,8 +264,8 @@ def solve_env(env, eval_env, scenario, config, resume=False, load_path=None):
 def _find_latest_checkpoint(scenario):
     ckpt_dir = f"logs/checkpoints/{scenario}"
     pattern = re.compile(r"rl_model_(\d+)_steps\.zip$")
-
     candidates = []
+
     if os.path.isdir(ckpt_dir):
         for path in glob.glob(os.path.join(ckpt_dir, "*.zip")):
             m = pattern.search(os.path.basename(path))
@@ -266,7 +319,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Build config by merging argparse → defaults
+    # Merge config
     CONFIG = DEFAULT_CONFIG.copy()
     CONFIG["env"] = {
         "env_id": args.env_id,
