@@ -400,6 +400,7 @@ if __name__ == "__main__":
                 print("Available run IDs:")
                 for run_id in available_runs[:10]:
                     print(f"  - {run_id}")
+            exit(0)
     
     resume_flag = resume_path is not None
 
