@@ -15,7 +15,7 @@ from gym.wrappers.resize_observation import ResizeObservation
 from nes_py.wrappers import JoypadSpace
 from gym_super_mario_bros import make as make_mario
 from gym_super_mario_bros.actions import SIMPLE_MOVEMENT
-
+from custom_extractor import MarioCNN
 from stable_baselines3.common.vec_env import (
     SubprocVecEnv,
     DummyVecEnv,
@@ -203,11 +203,16 @@ def solve_env(env, eval_env, config, resume=False, load_path=None, wandb_id=None
         )
         print(f"Resumed training from {load_path}")
     else:
+        policy_kwargs = dict(
+            features_extractor_class=MarioCNN,
+            features_extractor_kwargs=dict(features_dim=512),
+        )
         agent = PPO(
             "CnnPolicy",
             env,
             tensorboard_log="logs/tensorboard",
             seed=config["train"]["seed"],
+            policy_kwargs=policy_kwargs,
             **ppo_args,
         )
 
