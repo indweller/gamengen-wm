@@ -44,15 +44,8 @@ DEFAULT_CONFIG = {
         "n_envs": multiprocessing.cpu_count() - 2,
     },
     "ppo": {
-        "n_steps": 256,
-        "learning_rate": 2.5e-4,
+        "n_steps": 512,
         "batch_size": 256,
-        "clip_range": 0.1,
-        "ent_coef": 0.01,
-        "vf_coef": 0.5,
-        "n_epochs": 4,
-        "gamma": 0.99,
-        "policy_kwargs": {},
     },
     "train": {
         "total_timesteps": 10_000_000,
@@ -144,6 +137,7 @@ def make_eval_env_mario(cfg) -> VecMonitor:
                 env_id=cfg["env_id"],
                 frame_size=cfg["frame_size"],
                 grayscale=cfg["grayscale"],
+                skip=cfg.get("skip", 4),
                 render_mode=cfg.get("render_mode", None),
             )
         ]
@@ -194,7 +188,6 @@ def solve_env(env, eval_env, config, resume=False, load_path=None, wandb_id=None
         print(f"W&B run initialized: {run.url}")
         print(f"W&B run ID: {run.id}")
     
-    # Use W&B run ID as scenario name, or fall back to timestamp
     if run:
         scenario = f"mario_{run.id}"
     else:
