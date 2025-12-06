@@ -9,6 +9,7 @@ import datetime
 import wandb
 import torch
 import gym
+import numpy as np
 from tqdm import tqdm
 from gym.wrappers.gray_scale_observation import GrayScaleObservation
 from gym.wrappers.resize_observation import ResizeObservation
@@ -22,6 +23,7 @@ from stable_baselines3.common.vec_env import (
     VecTransposeImage,
     VecFrameStack,
     VecMonitor,
+    VecNormalize,
 )
 from stable_baselines3.ppo import PPO
 from stable_baselines3.common.callbacks import (
@@ -44,48 +46,98 @@ DEFAULT_CONFIG = {
         "n_envs": multiprocessing.cpu_count() - 2,
     },
     "ppo": {
-        "n_steps": 512,
-        "batch_size": 256,
+        "n_steps": 2048,
+        "batch_size": 64,
+        "learning_rate": 2.5e-4,
+        "ent_coef": 0.01,
+        "clip_range": 0.1,
+        "n_epochs": 10,
+        "gamma": 0.99,
+        "gae_lambda": 0.95,
     },
     "train": {
         "total_timesteps": 10_000_000,
-        "eval_freq": 100_000,
+        "eval_freq": 50_000,
         "eval_episodes": 5,
-        "checkpoint_freq": 100_000,
+        "save_freq": 100_000,
         "seed": 0,
     },
     "wandb": {
         "project": "mario-ppo",
         "group": "experiment-1",
         "name": "ppo-mario-run",
-        "log_interval": 10,
-        "enable": True
-    }
+        "log_interval": 1,
+        "enable": True,
+    },
 }
 
 
-class FrameSkip(gym.Wrapper):
+# class FrameSkip(gym.Wrapper):
+#     def __init__(self, env, skip=4):
+#         super().__init__(env)
+#         self.skip = skip
+
+#     def step(self, action):
+#         total_reward = 0.0
+#         terminated = False
+#         truncated = False
+#         info = {}
+#         for _ in range(self.skip):
+#             obs, reward, terminated, truncated, info = self.env.step(action)
+#             total_reward += reward
+#             if terminated or truncated:
+#                 break
+#         return obs, total_reward, terminated, truncated, info
+
+
+#### FROM STABLE BASELINES3 (library's wrapper doesn't work with old gym) ####
+class MaxAndSkipEnv(gym.Wrapper):
+    """
+    Return only every `skip`-th frame (frameskipping)
+    and return the max between the two last frames (to deal with flickering).
+    Compatible with the legacy 'gym' library used by Super Mario Bros.
+    """
+
     def __init__(self, env, skip=4):
         super().__init__(env)
-        self.skip = skip
+        # Most recent raw observations (for max pooling across time steps)
+        self._obs_buffer = np.zeros((2,) + env.observation_space.shape, dtype=np.uint8)
+        self._skip = skip
 
     def step(self, action):
         total_reward = 0.0
         terminated = False
         truncated = False
         info = {}
-        for _ in range(self.skip):
+        for i in range(self._skip):
             obs, reward, terminated, truncated, info = self.env.step(action)
+
+            if i == self._skip - 2:
+                self._obs_buffer[0] = obs
+            if i == self._skip - 1:
+                self._obs_buffer[1] = obs
+
             total_reward += reward
             if terminated or truncated:
                 break
-        return obs, total_reward, terminated, truncated, info
+
+        # Note: If the episode ends in the first step, the buffer might not be fully filled.
+        # In that case, we just return the last valid observation we saw.
+        if terminated or truncated:
+            max_frame = obs
+        else:
+            max_frame = self._obs_buffer.max(axis=0)
+
+        return max_frame, total_reward, terminated, truncated, info
+
+    def reset(self, **kwargs):
+        return self.env.reset(**kwargs)
 
 
 def build_mario_env(env_id, frame_size, grayscale, skip=4, render_mode=None):
     env = make_mario(env_id, render_mode=render_mode, apply_api_compatibility=True)
     env = JoypadSpace(env, SIMPLE_MOVEMENT)
-    env = FrameSkip(env, skip=skip)
+    env = MaxAndSkipEnv(env, skip=skip)
     if grayscale:
         env = GrayScaleObservation(env, keep_dim=True)
     env = ResizeObservation(env, shape=frame_size)
@@ -125,6 +177,7 @@ def make_vec_env_mario(cfg) -> VecMonitor:
     vec = SubprocVecEnv([_factory() for _ in range(cfg["n_envs"])])
     vec = VecMonitor(vec)
     vec = VecTransposeImage(vec)
+    vec = VecNormalize(vec, norm_obs=False, norm_reward=True, clip_reward=10.0)
     vec = VecFrameStack(vec, n_stack=cfg["frame_stack"], channels_order="first")
     return vec
 
@@ -144,6 +197,7 @@ def make_eval_env_mario(cfg) -> VecMonitor:
     )
     env = VecMonitor(env)
     env = VecTransposeImage(env)
+    env = VecNormalize(env, norm_obs=False, norm_reward=True, clip_reward=10.0)
     env = VecFrameStack(env, n_stack=cfg["frame_stack"], channels_order="first")
     return env
 
@@ -170,6 +224,18 @@ class ProgressBarCallback(BaseCallback):
         self.pbar.close()
 
 
+class SaveVecNormalizeCallback(BaseCallback):
+    def __init__(self, save_path: str, verbose=1):
+        super().__init__(verbose)
+        self.save_path = save_path
+
+    def _on_step(self) -> bool:
+        if self.verbose > 0:
+            print(f"Saving VecNormalize stats to {self.save_path}")
+        self.training_env.save(self.save_path)
+        return True
+
+
 def solve_env(env, eval_env, config, resume=False, load_path=None, wandb_id=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ppo_args = {**config["ppo"], "device": device}
@@ -187,13 +253,13 @@ def solve_env(env, eval_env, config, resume=False, load_path=None, wandb_id=None
         )
         print(f"W&B run initialized: {run.url}")
         print(f"W&B run ID: {run.id}")
-    
+
     if run:
         scenario = f"mario_{run.id}"
     else:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         scenario = f"mario_{timestamp}"
-    
+
     print(f"Scenario directory: {scenario}")
 
     # Load or create PPO
@@ -219,21 +285,25 @@ def solve_env(env, eval_env, config, resume=False, load_path=None, wandb_id=None
     agent.policy.to(device)
 
     # Callbacks from config
+    stats_path = os.path.join(f"logs/models/{scenario}", "vec_normalize.pkl")
+    save_stats_cb = SaveVecNormalizeCallback(save_path=stats_path)
+    eval_freq = max(config["train"]["eval_freq"] // config["env"]["n_envs"], 1)
     eval_callback = EvalCallback(
         eval_env,
         n_eval_episodes=config["train"]["eval_episodes"],
-        eval_freq=config["train"]["eval_freq"],
+        eval_freq=eval_freq,
         log_path=f"logs/evaluations/{scenario}",
         best_model_save_path=f"logs/models/{scenario}",
+        callback_on_new_best=save_stats_cb,
     )
 
     os.makedirs(f"logs/checkpoints/{scenario}", exist_ok=True)
+    save_freq = max(config["train"]["save_freq"] // config["env"]["n_envs"], 1)
     checkpoint_callback = CheckpointCallback(
-        save_freq=config["train"]["checkpoint_freq"],
+        save_freq=save_freq,
         save_path=f"logs/checkpoints/{scenario}",
-        name_prefix="rl_model",
         save_replay_buffer=False,
-        save_vecnormalize=False,
+        save_vecnormalize=True,
     )
 
     pbar = tqdm(total=config["train"]["total_timesteps"], desc="Training Progress")
@@ -241,7 +311,7 @@ def solve_env(env, eval_env, config, resume=False, load_path=None, wandb_id=None
 
     callbacks = [eval_callback, checkpoint_callback, progress_callback]
 
-    if config["wandb"]["enable"]:    
+    if config["wandb"]["enable"]:
         wandb_callback = WandbCallback(
             model_save_path=None,
             verbose=2,
@@ -265,13 +335,15 @@ def solve_env(env, eval_env, config, resume=False, load_path=None, wandb_id=None
         pbar.close()
         env.close()
         eval_env.close()
-        
+
         # Save final model
         final_path = f"logs/models/{scenario}/final_model"
         os.makedirs(os.path.dirname(final_path), exist_ok=True)
         agent.save(final_path)
-        print(f"Final model saved to {final_path}")
-        
+        stats_path = os.path.join(os.path.dirname(final_path), "vec_normalize.pkl")
+        train_env.save(stats_path)
+        print(f"Final model saved to {final_path} and stats to {stats_path}")
+
         if config["wandb"]["enable"]:
             wandb.finish()
 
@@ -282,7 +354,7 @@ def _find_latest_checkpoint(wandb_id=None):
     """Find latest checkpoint for a given W&B run ID."""
     if not wandb_id:
         return None, None
-    
+
     scenario = f"mario_{wandb_id}"
     ckpt_dir = f"logs/checkpoints/{scenario}"
     pattern = re.compile(r"rl_model_(\d+)_steps\.zip$")
@@ -305,7 +377,7 @@ def _find_latest_checkpoint(wandb_id=None):
             checkpoint_path = best
         elif os.path.exists(final):
             checkpoint_path = final
-    
+
     return checkpoint_path, wandb_id
 
 
@@ -313,13 +385,13 @@ def _find_all_wandb_runs():
     """Find all W&B run IDs that have been used."""
     runs = []
     checkpoint_dir = "logs/checkpoints"
-    
+
     if os.path.isdir(checkpoint_dir):
         for entry in os.listdir(checkpoint_dir):
             if entry.startswith("mario_"):
                 wandb_id = entry.replace("mario_", "")
                 runs.append(wandb_id)
-    
+
     return runs
 
 
@@ -346,7 +418,9 @@ if __name__ == "__main__":
         default=DEFAULT_CONFIG["train"]["total_timesteps"],
     )
     parser.add_argument("--n_steps", type=int, default=DEFAULT_CONFIG["ppo"]["n_steps"])
-    parser.add_argument("--batch_size", type=int, default=DEFAULT_CONFIG["ppo"]["batch_size"])
+    parser.add_argument(
+        "--batch_size", type=int, default=DEFAULT_CONFIG["ppo"]["batch_size"]
+    )
     parser.add_argument(
         "--eval_freq", type=int, default=DEFAULT_CONFIG["train"]["eval_freq"]
     )
@@ -354,14 +428,16 @@ if __name__ == "__main__":
         "--eval_episodes", type=int, default=DEFAULT_CONFIG["train"]["eval_episodes"]
     )
     parser.add_argument(
-        "--checkpoint_freq",
+        "--save_freq",
         type=int,
-        default=DEFAULT_CONFIG["train"]["checkpoint_freq"],
+        default=DEFAULT_CONFIG["train"]["save_freq"],
     )
     parser.add_argument("--seed", type=int, default=DEFAULT_CONFIG["train"]["seed"])
     parser.add_argument("--force_fresh", action="store_true")
     parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging")
-    parser.add_argument("--resume_id", type=str, default=None, help="W&B run ID to resume from")
+    parser.add_argument(
+        "--resume_id", type=str, default=None, help="W&B run ID to resume from"
+    )
 
     args = parser.parse_args()
 
@@ -379,7 +455,7 @@ if __name__ == "__main__":
     CONFIG["ppo"]["batch_size"] = args.batch_size
     CONFIG["train"]["eval_freq"] = args.eval_freq
     CONFIG["train"]["eval_episodes"] = args.eval_episodes
-    CONFIG["train"]["checkpoint_freq"] = args.checkpoint_freq
+    CONFIG["train"]["save_freq"] = args.save_freq
     CONFIG["train"]["seed"] = args.seed
 
     if args.no_wandb:
@@ -401,21 +477,23 @@ if __name__ == "__main__":
     train_env = make_vec_env_mario(env_cfg)
     eval_env = make_eval_env_mario(env_cfg)
 
-    wandb_id = args.resume_id 
+    wandb_id = args.resume_id
     resume_path = None
-    
+
     if not args.force_fresh:
         if wandb_id:
             resume_path, _ = _find_latest_checkpoint(wandb_id)
         elif CONFIG["wandb"]["enable"]:
             available_runs = _find_all_wandb_runs()
             if available_runs:
-                print(f"\nFound {len(available_runs)} previous run(s). Use --resume_id <ID> to resume.")
+                print(
+                    f"\nFound {len(available_runs)} previous run(s). Use --resume_id <ID> to resume."
+                )
                 print("Available run IDs:")
                 for run_id in available_runs[:10]:
                     print(f"  - {run_id}")
             exit(0)
-    
+
     resume_flag = resume_path is not None
 
     if resume_flag:
