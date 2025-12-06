@@ -22,11 +22,18 @@ import torch
 from datasets import load_dataset
 from huggingface_hub import HfApi
 
-from stable_baselines3.common.vec_env import VecEnv
+from stable_baselines3.common.vec_env import (
+    VecEnv,
+    DummyVecEnv,
+    VecMonitor,
+    VecTransposeImage,
+    VecFrameStack,
+    VecNormalize,
+)
 from stable_baselines3.ppo import PPO
 
 # Reuse env builders and model loader from training script for consistency
-from train_ppo_mario import make_eval_env_mario, DEFAULT_CONFIG
+from train_ppo_mario import build_mario_env, DEFAULT_CONFIG
 
 warnings.filterwarnings("ignore")
 
@@ -68,33 +75,42 @@ def save_episode_to_parquet(episode_data: dict, output_dir: str) -> None:
     pq.write_table(table, filename, compression="zstd")
 
 
-def make_gif(agent, file_path: str, env_kwargs: dict, num_episodes: int = 1) -> None:
-    env = make_eval_env_mario(env_kwargs)
+def make_gif(env, agent, file_path: str, num_episodes: int = 1) -> None:
     images = []
+    # print avg reward over episodes and steps
+    total_rewards = []
+    total_steps = []
 
     for ep in range(num_episodes):
         obs = env.reset()
         done = [False]
         step_i = 0
         action = None
+        total_reward = 0.0
         while not done[0]:
             if action is None or step_i % ACTION_REPEAT == 0:
                 action, _ = agent.predict(obs)
-            obs, _, done, _ = env.step(action)
+            obs, reward, done, _ = env.step(action)
+            total_reward += reward
             frame = _render_rgb_frame(env)
             if frame is not None:
                 images.append(np.array(frame).copy())
             step_i += 1
+        print(
+            f"Episode {ep + 1} finished with total reward: {total_reward} in {step_i} steps"
+        )
+        total_rewards.append(total_reward)
+        total_steps.append(step_i)
+    avg_reward = sum(total_rewards) / num_episodes
+    avg_steps = sum(total_steps) / num_episodes
+    print(f"Average reward over {num_episodes} episodes: {avg_reward}")
+    print(f"Average steps over {num_episodes} episodes: {avg_steps}")
     print(f"Saving GIF to {file_path} with {len(images)} frames")
-    imageio.mimsave(file_path, images[:1000], fps=20)
+    imageio.mimsave(file_path, images, fps=20)
     env.close()
 
 
-def make_parquet_dataset(
-    agent, output_dir: str, env_kwargs: dict, num_episodes: int = 1
-) -> None:
-    env = make_eval_env_mario(env_kwargs)
-
+def make_parquet_dataset(env, agent, output_dir: str, num_episodes: int = 1) -> None:
     for ep in tqdm(range(num_episodes), desc="Episodes"):
         obs = env.reset()
         done = False
@@ -157,7 +173,9 @@ def parse_args():
     p.add_argument(
         "--env_id", default=DEFAULT_CONFIG["env"]["env_id"], help="Mario env id"
     )
+    p.add_argument("--run_id", default=None, help="Run ID for model path")
     p.add_argument("--model_path", default=None, help="Path to SB3 .zip model")
+    p.add_argument("--stats_path", default=None, help="Path to VecNormalize stats file")
     p.add_argument("--episodes", type=int, default=1)
     p.add_argument("--output", choices=["gif", "parquet"], required=True)
     p.add_argument(
@@ -178,12 +196,39 @@ def load_model(load_path: str, env: VecEnv, device: str = "cpu") -> PPO:
     return agent
 
 
+def get_env(env_kwargs: dict, stats_path: str) -> VecEnv:
+    env = DummyVecEnv(
+        [
+            lambda: build_mario_env(
+                env_id=env_kwargs["env_id"],
+                frame_size=env_kwargs["frame_size"],
+                grayscale=env_kwargs["grayscale"],
+                skip=env_kwargs.get("skip", 4),
+                render_mode=env_kwargs.get("render_mode"),
+            )
+        ]
+    )
+
+    # Create the vectorized environment
+    env = VecMonitor(env)
+    env = VecTransposeImage(env)
+
+    env = VecNormalize.load(stats_path, env)
+    env.training = False
+    env.norm_reward = False
+    env = VecFrameStack(env, n_stack=env_kwargs["frame_stack"], channels_order="first")
+    return env
+
+
 def main():
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    scenario = f"mario_{args.env_id.replace('-', '_')}"
+    if not args.run_id:
+        raise ValueError("Run ID must be specified via --run_id")
+
+    run_id = f"mario_{args.run_id}"
 
     # Environment kwargs from CONFIG
     env_kwargs = {
@@ -194,25 +239,26 @@ def main():
         "render_mode": "rgb_array",
     }
 
-    # Load evaluation environment
-    load_env = make_eval_env_mario(env_kwargs)
-
-    # Load trained model
     model_path = args.model_path or os.path.join(
-        "logs", "models", scenario, "final_model"
+        "logs", "models", run_id, "best_model"
     )
-    agent = load_model(model_path, load_env, device=str(device))
+    stats_path = args.stats_path or os.path.join(
+        os.path.dirname(model_path), "vec_normalize.pkl"
+    )
+    if not os.path.exists(stats_path):
+        raise FileNotFoundError(f"VecNormalize stats file not found: {stats_path}")
+    env = get_env(env_kwargs, stats_path)
+    agent = load_model(model_path, env, device=str(device))
     agent.policy.to(device)
 
-    # Run episodes
     if args.output == "gif":
-        out_file = args.out or "mario_rollout.gif"
-        make_gif(agent, out_file, env_kwargs, num_episodes=args.episodes)
+        out_file = args.out or f"mario_rollout_{args.run_id}.gif"
+        make_gif(env, agent, out_file, num_episodes=args.episodes)
         if args.upload and args.hf_repo:
             upload_to_hf(out_file, args.hf_repo)
     else:
-        out_dir = args.out or "mario_dataset"
-        make_parquet_dataset(agent, out_dir, env_kwargs, num_episodes=args.episodes)
+        out_dir = args.out or f"mario_dataset_{args.run_id}"
+        make_parquet_dataset(env, agent, out_dir, num_episodes=args.episodes)
         if args.upload and args.hf_repo:
             create_hf_dataset_from_parquets(out_dir, repo_id=args.hf_repo)
 
