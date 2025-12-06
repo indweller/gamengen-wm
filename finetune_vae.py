@@ -6,12 +6,14 @@ import torch
 import torch.nn.functional as F
 from diffusers import AutoencoderKL
 from torch import optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import get_cosine_schedule_with_warmup
 
 from config_sd import PRETRAINED_MODEL_NAME_OR_PATH
-from png_dataset import PNGDataset  # <-- our custom dataset
+
+from datasets import load_dataset
+from torchvision import transforms
 
 import wandb
 
@@ -28,31 +30,50 @@ IMAGE_SIZE = 512  # adjust if you want another size
 
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Fine-tune VAE model on PNG dataset")
+    parser = argparse.ArgumentParser(description="Fine-tune VAE model on HF image dataset")
+
     parser.add_argument(
         "--hf_model_folder",
         type=str,
         required=True,
-        help="HuggingFace model folder to save the model to",
+        help="HuggingFace model repo id to push the model to (e.g. user/vae-finetune)",
     )
+
     parser.add_argument(
-        "--data_root",
+        "--hf_dataset_repo",
         type=str,
         required=True,
-        help="Root folder containing PNG images (recursively searched)",
+        help="HuggingFace dataset repo id to load images from (e.g. user/mario-frames)",
     )
+
+    parser.add_argument(
+        "--train_split",
+        type=str,
+        default="train",
+        help="Name of the training split in the dataset (default: train)",
+    )
+
+    parser.add_argument(
+        "--val_split",
+        type=str,
+        default="validation",
+        help="Name of the validation split in the dataset (if missing, will be created via train_test_split)",
+    )
+
     parser.add_argument(
         "--image_size",
         type=int,
         default=IMAGE_SIZE,
         help="Target image size (height=width)",
     )
+
     parser.add_argument(
         "--test_size",
         type=float,
         default=0.1,
-        help="Fraction of data to use for test/validation",
+        help="Fraction of data to use for test/validation if val_split does not exist",
     )
+
     return parser.parse_args()
 
 
@@ -76,12 +97,12 @@ def eval_model(model: AutoencoderKL, test_loader: DataLoader) -> float:
             loss = F.mse_loss(reconstruction, data, reduction="mean")
             test_loss += loss.item()
 
-            # Log a few reconstructions
+            # Optionally log a few reconstructions (here: first batch only)
             recon = model.decode(model.encode(data).latent_dist.sample()).sample
             wandb.log(
                 {
-                    "original": [wandb.Image(img) for img in data],
-                    "reconstructed": [wandb.Image(img) for img in recon],
+                    "original": [wandb.Image(img) for img in data[:4]],
+                    "reconstructed": [wandb.Image(img) for img in recon[:4]],
                 }
             )
 
@@ -90,6 +111,7 @@ def eval_model(model: AutoencoderKL, test_loader: DataLoader) -> float:
 
 def main():
     args = parse_args()
+
     wandb.init(
         project="gamengen-vae-training",
         config={
@@ -104,29 +126,69 @@ def main():
             "warmup_steps": NUM_WARMUP_STEPS,
             "gradient_clip_norm": GRADIENT_CLIP_NORM,
             "hf_model_folder": args.hf_model_folder,
-            "data_root": args.data_root,
+            "hf_dataset_repo": args.hf_dataset_repo,
             "image_size": args.image_size,
         },
         name=f"vae-finetuning-{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}",
     )
 
     # =====================
-    # Dataset Setup (PNG)
+    # Dataset Setup (HF)
     # =====================
-    full_dataset = PNGDataset(root_dir=args.data_root)
-    n_total = len(full_dataset)
-    n_test = max(1, int(math.floor(n_total * args.test_size)))
-    n_train = n_total - n_test
 
-    train_dataset, test_dataset = random_split(
-        full_dataset, [n_train, n_test], generator=torch.Generator().manual_seed(42)
+    # Load dataset dict; e.g. {"train": Dataset, "validation": Dataset}
+    raw_dataset = load_dataset(args.hf_dataset_repo)
+
+    if args.train_split not in raw_dataset:
+        raise ValueError(f"Train split '{args.train_split}' not found in dataset")
+
+    if args.val_split in raw_dataset:
+        train_dataset = raw_dataset[args.train_split]
+        test_dataset = raw_dataset[args.val_split]
+    else:
+        # Create a validation split from the training split
+        split = raw_dataset[args.train_split].train_test_split(
+            test_size=args.test_size, seed=42
+        )
+        train_dataset = split["train"]
+        test_dataset = split["test"]
+
+    # Transform: resize -> tensor -> normalize to [-1, 1]
+    image_transform = transforms.Compose(
+        [
+            transforms.ToTensor(),  # [0,1]
+            transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),  # -> [-1,1]
+        ]
     )
+
+    def hf_transform(examples):
+        # expects column "image" with PIL Images
+        images = [img.convert("RGB") for img in examples["image"]]
+        pixel_values = [image_transform(img) for img in images]
+        return {"pixel_values": pixel_values}
+
+    train_dataset.set_transform(hf_transform)
+    test_dataset.set_transform(hf_transform)
+
+    def collate_fn(examples):
+        pixel_values = torch.stack([e["pixel_values"] for e in examples])
+        return {"pixel_values": pixel_values}
 
     train_loader = DataLoader(
-        train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=8, pin_memory=True
+        train_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=8,
+        pin_memory=True,
+        collate_fn=collate_fn,
     )
     test_loader = DataLoader(
-        test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=8, pin_memory=True
+        test_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=8,
+        pin_memory=True,
+        collate_fn=collate_fn,
     )
 
     # =====================
@@ -143,10 +205,13 @@ def main():
     optimizer = optim.AdamW(
         model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
     )
+
     num_training_steps = NUM_EPOCHS * len(train_loader)
+    warmup_steps = min(NUM_WARMUP_STEPS, num_training_steps // 2) if num_training_steps > 0 else 0
+
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
-        num_warmup_steps=NUM_WARMUP_STEPS,
+        num_warmup_steps=warmup_steps,
         num_training_steps=num_training_steps,
     )
 
@@ -184,13 +249,17 @@ def main():
             if step % EVAL_STEP == 0:
                 test_loss = eval_model(model, test_loader)
 
-                # save model to hub
+                # Save model to Hugging Face Hub
                 model.save_pretrained(
-                    "test",
-                    repo_id=args.hf_model_folder,
+                    args.hf_model_folder,
                     push_to_hub=True,
                 )
                 wandb.log({"test_loss": test_loss})
+
+    # Final eval + save (optional)
+    final_test_loss = eval_model(model, test_loader)
+    wandb.log({"final_test_loss": final_test_loss})
+    model.save_pretrained(args.hf_model_folder, push_to_hub=True)
 
 
 if __name__ == "__main__":
