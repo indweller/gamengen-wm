@@ -4,7 +4,7 @@ BUFFER_SIZE = 9
 # Given by the paper
 ZERO_OUT_ACTION_CONDITIONING_PROB = 0.1
 
-HEIGHT = 240
+HEIGHT = 256
 WIDTH = 240
 
 # CFG ratio
@@ -21,7 +21,7 @@ NUM_BUCKETS = 10
 PRETRAINED_MODEL_NAME_OR_PATH = "CompVis/stable-diffusion-v1-4"
 
 # Repo name for dumping model artifacts
-REPO_NAME = "arnaudstiegler/sd-model-gameNgen"
+REPO_NAME = "Flaaaande/mario-sd"
 
 # When not using frame conditioning, we use this prompt
 VALIDATION_PROMPT = "video game doom image, high quality, 4k, high resolution"
