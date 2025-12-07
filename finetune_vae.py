@@ -81,13 +81,11 @@ def build_dataloaders(test_size: float, batch_size: int):
     """
 
     # Load full dataset
-    raw = load_dataset("Flaaaande/mario-png")  # default config, has 'train' split
-    full_train = raw["train"]
+    dataset = load_dataset("Flaaaande/mario-png")  # default config, has 'train' split
 
     # Train/val split
-    split = full_train.train_test_split(test_size=test_size, seed=42)
-    train_dataset = split["train"]
-    test_dataset = split["test"]
+    train_dataset = dataset["train"]
+    test_dataset = dataset["validation"]
 
     # Transform: HWC uint8 -> CHW float in [-1, 1]
     image_transform = transforms.Compose(
