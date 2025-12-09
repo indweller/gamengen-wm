@@ -97,6 +97,72 @@ def create_hf_dataset_from_parquets(parquet_dir: str, repo_id: str) -> None:
 # Build parquet shards (bounded memory)
 # ----------------------------
 
+A = 128
+UP = 64
+LEFT = 32
+B = 16
+RIGHT = 4
+DOWN = 2
+
+# COMPLEX_MOVEMENT definition
+COMPLEX_MOVEMENT = [
+    ['NOOP'],           # 0
+    ['right'],          # 1
+    ['right', 'A'],     # 2
+    ['right', 'B'],     # 3
+    ['right', 'A', 'B'],# 4
+    ['A'],              # 5
+    ['left'],           # 6
+    ['left', 'A'],      # 7
+    ['left', 'B'],      # 8
+    ['left', 'A', 'B'], # 9
+    ['down'],           # 10
+    ['up'],             # 11
+]
+
+def nes_byte_to_complex_action(action_byte: int) -> int:
+    """
+    Convert 8-bit NES action to COMPLEX_MOVEMENT index.
+    
+    Returns:
+        int: Index into COMPLEX_MOVEMENT (0-11), or -1 if unmappable
+    """
+    # Extract button states
+    a_pressed = bool(action_byte & A)
+    b_pressed = bool(action_byte & B)
+    up_pressed = bool(action_byte & UP)
+    down_pressed = bool(action_byte & DOWN)
+    left_pressed = bool(action_byte & LEFT)
+    right_pressed = bool(action_byte & RIGHT)
+    
+    # Priority-based mapping (matches COMPLEX_MOVEMENT order)
+    if right_pressed:
+        if a_pressed and b_pressed:
+            return 4  # right + A + B
+        elif a_pressed:
+            return 2  # right + A
+        elif b_pressed:
+            return 3  # right + B
+        else:
+            return 1  # right only
+    elif left_pressed:
+        if a_pressed and b_pressed:
+            return 9  # left + A + B
+        elif a_pressed:
+            return 7  # left + A
+        elif b_pressed:
+            return 8  # left + B
+        else:
+            return 6  # left only
+    elif down_pressed:
+        return 10  # down
+    elif up_pressed:
+        return 11  # up
+    elif a_pressed:
+        return 5  # A (jump in place)
+    else:
+        return 0  # NOOP
+
 def parse_filename(path: str):
     fname = os.path.basename(path)
     m = pattern.match(fname)
@@ -141,7 +207,7 @@ def build_and_save_episodes(root_dir: str, output_dir: str):
         events.sort(key=lambda x: x[0])  # sort by frame index
 
         frames = [load_image(e[1]) for e in events]
-        actions = [e[2] for e in events]
+        actions = [nes_byte_to_complex_action(e[2]) for e in events]
         steps = list(range(len(events)))
 
         # Global unique ID
