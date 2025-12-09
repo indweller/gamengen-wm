@@ -81,7 +81,7 @@ def build_dataloaders(test_size: float, batch_size: int):
     """
 
     # Load full dataset
-    dataset = load_dataset("Flaaaande/mario-png")  # default config, has 'train' split
+    dataset = load_dataset("Flaaaande/mario-png-split")  # default config, has 'train' split
 
     # Train/val split
     train_dataset = dataset["train"]
