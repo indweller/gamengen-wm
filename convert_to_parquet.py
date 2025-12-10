@@ -11,7 +11,6 @@ import pyarrow as pa
 import numpy as np
 from PIL import Image
 
-from datasets import Dataset, Features, Array3D, Value
 from huggingface_hub import HfApi, create_repo
 
 from tqdm import tqdm
@@ -43,15 +42,6 @@ def load_image(path: str) -> np.ndarray:
         arr = np.asarray(img, dtype="uint8")
     return arr
 
-
-FEATURES = Features({
-    "image": Array3D(
-        dtype="uint8",
-        shape=(IMAGE_HEIGHT, IMAGE_WIDTH, 3),
-    ),
-    "path": Value("string"),
-})
-
 pattern = re.compile(
     r"^(?P<user>[^_]+)_"                # user
     r"(?P<sessid>[^_]+)_"              # sessid
@@ -66,13 +56,12 @@ pattern = re.compile(
 
 def save_episode_to_parquet(episode_data: dict, output_dir: str) -> None:
     # frames are numpy arrays -> convert to nested lists so Arrow can store them
-    frames_as_lists = [f.tolist() for f in episode_data["frames"]]
 
     processed = {
         "episode_id": episode_data["episode_id"],            # global int ID
         "session_id": episode_data["session_id"],            # original session
         "episode_in_session": episode_data["episode_in_session"],
-        "frames": frames_as_lists,                           # (H, W, 3) lists
+        "frames": episode_data["frames"],                           # (H, W, 3) lists
         "actions": [int(a) for a in episode_data["actions"]],
         "step_id": [int(s) for s in episode_data["step_id"]],
     }
@@ -185,19 +174,17 @@ def build_and_save_episodes(root_dir: str, output_dir: str):
     all_pngs = glob.glob(os.path.join(root_dir, "**", "*.png"), recursive=True)
     print(f"Found {len(all_pngs)} PNG files")
 
-    for path in tqdm(all_pngs, desc="Scanning filenames", total=len(all_pngs)):
+    for path in tqdm(sorted(all_pngs), desc="Scanning filenames", total=len(all_pngs)):
         info = parse_filename(path)
         if info is None:
             continue
 
         key = (info["sessid"], info["episode"])
-        reward = 1.0 if info["outcome"] == "success" else 0.0
 
         episodes[key].append((
             info["frame"],     # sort key
             info["path"], 
             info["action"], 
-            reward
         ))
 
     # Assign global running counter
@@ -206,8 +193,11 @@ def build_and_save_episodes(root_dir: str, output_dir: str):
     for (sessid, ep_session), events in tqdm(episodes.items(), desc="Saving episodes", total=len(episodes)):
         events.sort(key=lambda x: x[0])  # sort by frame index
 
-        frames = [load_image(e[1]) for e in events]
-        actions = [nes_byte_to_complex_action(e[2]) for e in events]
+        frames = []
+        actions = []
+        for e in tqdm(events, total=len(events), desc="Loading frames", leave=False):
+            frames.append(load_image(e[1]).tolist())
+            actions.append(nes_byte_to_complex_action(e[2]))
         steps = list(range(len(events)))
 
         # Global unique ID
@@ -288,7 +278,7 @@ def main():
 
     if args.push:
         create_hf_dataset_from_parquets(
-            local_dir=args.out_dir,
+            parquet_dir=args.out_dir,
             repo_id=REPO_ID,
         )
 
