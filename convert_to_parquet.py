@@ -8,7 +8,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import pyarrow as pa
 
-import numpy as np
+import io
 from PIL import Image
 
 from huggingface_hub import HfApi, create_repo
@@ -31,16 +31,20 @@ REPO_ID = "Flaaaande/mario-png-actions"  # your HF repo
 
 
 # ----------------------------
-# Image loading
+# Image loading (PNG bytes)
 # ----------------------------
 
-def load_image(path: str) -> np.ndarray:
-    """Load PNG, convert to RGB, resize, return uint8 array (H, W, 3)."""
+def load_image(path: str) -> bytes:
+    """
+    Load PNG, convert to RGB, resize, and return PNG-encoded bytes.
+    """
     with Image.open(path) as img:
         img = img.convert("RGB")
         img = img.resize((IMAGE_WIDTH, IMAGE_HEIGHT), Image.BICUBIC)
-        arr = np.asarray(img, dtype="uint8")
-    return arr
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
 
 pattern = re.compile(
     r"^(?P<user>[^_]+)_"                # user
@@ -55,13 +59,18 @@ pattern = re.compile(
 )
 
 def save_episode_to_parquet(episode_data: dict, output_dir: str) -> None:
-    # frames are numpy arrays -> convert to nested lists so Arrow can store them
+    """
+    Save one episode as a parquet file.
 
+    frames: list of PNG bytes
+    actions: list[int]
+    step_id: list[int]
+    """
     processed = {
         "episode_id": episode_data["episode_id"],            # global int ID
         "session_id": episode_data["session_id"],            # original session
         "episode_in_session": episode_data["episode_in_session"],
-        "frames": episode_data["frames"],                           # (H, W, 3) lists
+        "frames": episode_data["frames"],                    # list[bytes] (PNG data)
         "actions": [int(a) for a in episode_data["actions"]],
         "step_id": [int(s) for s in episode_data["step_id"]],
     }
@@ -73,6 +82,7 @@ def save_episode_to_parquet(episode_data: dict, output_dir: str) -> None:
     filename = os.path.join(output_dir, f"episode_{processed['episode_id'][0]}.parquet")
     pq.write_table(table, filename, compression="zstd")
 
+
 def create_hf_dataset_from_parquets(parquet_dir: str, repo_id: str) -> None:
     files = sorted(glob.glob(os.path.join(parquet_dir, "*.parquet")))
     if not files:
@@ -82,8 +92,9 @@ def create_hf_dataset_from_parquets(parquet_dir: str, repo_id: str) -> None:
     dsd = load_dataset("parquet", data_files={"train": files}, cache_dir="/scratch/ps5392/cache")
     dsd.push_to_hub(repo_id, private=False)
 
+
 # ----------------------------
-# Build parquet shards (bounded memory)
+# NES action mapping
 # ----------------------------
 
 A = 128
@@ -93,7 +104,6 @@ B = 16
 RIGHT = 4
 DOWN = 2
 
-# COMPLEX_MOVEMENT definition
 COMPLEX_MOVEMENT = [
     ['NOOP'],           # 0
     ['right'],          # 1
@@ -109,22 +119,21 @@ COMPLEX_MOVEMENT = [
     ['up'],             # 11
 ]
 
+
 def nes_byte_to_complex_action(action_byte: int) -> int:
     """
     Convert 8-bit NES action to COMPLEX_MOVEMENT index.
-    
+
     Returns:
         int: Index into COMPLEX_MOVEMENT (0-11), or -1 if unmappable
     """
-    # Extract button states
     a_pressed = bool(action_byte & A)
     b_pressed = bool(action_byte & B)
     up_pressed = bool(action_byte & UP)
     down_pressed = bool(action_byte & DOWN)
     left_pressed = bool(action_byte & LEFT)
     right_pressed = bool(action_byte & RIGHT)
-    
-    # Priority-based mapping (matches COMPLEX_MOVEMENT order)
+
     if right_pressed:
         if a_pressed and b_pressed:
             return 4  # right + A + B
@@ -152,6 +161,7 @@ def nes_byte_to_complex_action(action_byte: int) -> int:
     else:
         return 0  # NOOP
 
+
 def parse_filename(path: str):
     fname = os.path.basename(path)
     m = pattern.match(fname)
@@ -167,6 +177,7 @@ def parse_filename(path: str):
         "path": path,
     }
 
+
 def build_and_save_episodes(root_dir: str, output_dir: str):
     # episodes[(session_id, episode_within_session)] = list(...)
     episodes = defaultdict(list)
@@ -181,34 +192,41 @@ def build_and_save_episodes(root_dir: str, output_dir: str):
 
         key = (info["sessid"], info["episode"])
 
-        episodes[key].append((
-            info["frame"],     # sort key
-            info["path"], 
-            info["action"], 
-        ))
+        episodes[key].append(
+            (
+                info["frame"],  # sort key
+                info["path"],
+                info["action"],
+            )
+        )
 
     # Assign global running counter
     global_episode_counter = 0
 
     for (sessid, ep_session), events in tqdm(episodes.items(), desc="Saving episodes", total=len(episodes)):
-        events.sort(key=lambda x: x[0])  # sort by frame index
 
         frames = []
         actions = []
-        for e in tqdm(events, total=len(events), desc="Loading frames", leave=False):
-            frames.append(load_image(e[1]).tolist())
+
+        # sort by frame index to preserve temporal order
+        events_sorted = sorted(events, key=lambda e: e[0])
+
+        for e in tqdm(events_sorted, total=len(events_sorted), desc="Loading frames", leave=False):
+            png_bytes = load_image(e[1])           # <-- returns bytes
+            frames.append(png_bytes)
             actions.append(nes_byte_to_complex_action(e[2]))
-        steps = list(range(len(events)))
+
+        steps = list(range(len(events_sorted)))
 
         # Global unique ID
         global_id = global_episode_counter
         global_episode_counter += 1
 
         episode_dict = {
-            "episode_id": [global_id] * len(steps),  # global counter
-            "session_id": [sessid] * len(steps),     # original session id
+            "episode_id": [global_id] * len(steps),      # global counter
+            "session_id": [sessid] * len(steps),         # original session id
             "episode_in_session": [ep_session] * len(steps),
-            "frames": frames,
+            "frames": frames,                            # list[bytes]
             "actions": actions,
             "step_id": steps,
         }
@@ -232,8 +250,6 @@ def upload_parquet_folder_to_hub(
     HF does NOT care that shards are 10k each; this is just a flat folder upload.
     """
     api = HfApi()
-
-    # Assumes you already did `huggingface-cli login` or have HF_TOKEN set.
     create_repo(repo_id=repo_id, repo_type=repo_type, exist_ok=True)
 
     print(f"Uploading folder {local_dir} to HF Hub repo {repo_id}...")
@@ -274,7 +290,8 @@ def main():
     args = parser.parse_args()
 
     build_and_save_episodes(
-        root_dir=args.img_root, output_dir=args.out_dir)
+        root_dir=args.img_root, output_dir=args.out_dir
+    )
 
     if args.push:
         create_hf_dataset_from_parquets(
