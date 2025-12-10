@@ -185,7 +185,7 @@ def build_and_save_episodes(root_dir: str, output_dir: str):
     all_pngs = glob.glob(os.path.join(root_dir, "**", "*.png"), recursive=True)
     print(f"Found {len(all_pngs)} PNG files")
 
-    for path in tqdm(all_pngs, desc="Scanning filenames"):
+    for path in tqdm(all_pngs, desc="Scanning filenames", total=len(all_pngs)):
         info = parse_filename(path)
         if info is None:
             continue
@@ -203,7 +203,7 @@ def build_and_save_episodes(root_dir: str, output_dir: str):
     # Assign global running counter
     global_episode_counter = 0
 
-    for (sessid, ep_session), events in tqdm(episodes.items(), desc="Saving episodes"):
+    for (sessid, ep_session), events in tqdm(episodes.items(), desc="Saving episodes", total=len(episodes)):
         events.sort(key=lambda x: x[0])  # sort by frame index
 
         frames = [load_image(e[1]) for e in events]
@@ -283,6 +283,8 @@ def main():
     )
     args = parser.parse_args()
 
+    build_and_save_episodes(
+        root_dir=args.img_root, output_dir=args.out_dir)
 
     if args.push:
         create_hf_dataset_from_parquets(
