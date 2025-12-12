@@ -1,4 +1,5 @@
 import torch
+import random
 from PIL import Image
 import io
 from torchvision import transforms
@@ -59,6 +60,31 @@ class EpisodeDataset:
             padding = [IMG_TRANSFORMS(Image.new('RGB', (WIDTH, HEIGHT), color='black')) for _ in range(BUFFER_SIZE - idx)]
             return {'pixel_values': padding + self.dataset[:idx+1]['pixel_values'], 'input_ids': torch.concat([torch.zeros(len(padding), dtype=torch.long), self.dataset[:idx+1]['input_ids']])}
         return self.dataset[idx-BUFFER_SIZE:idx+1]
+
+    def get_action_dim(self) -> int:
+        return self.action_dim
+
+class LatentDataset:
+    def __init__(self, dataset_name: str):
+        self.dataset = load_dataset(dataset_name)['train']
+        self.action_dim = max(action for action in self.dataset['actions']) + 1
+        self.dataset = self.dataset.with_transform(preprocess_train)
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        # if idx < BUFFER_SIZE:
+        #     padding = [IMG_TRANSFORMS(Image.new('RGB', (WIDTH, HEIGHT), color='black')) for _ in range(BUFFER_SIZE - idx)]
+        #     return {'pixel_values': padding + self.dataset[:idx+1]['pixel_values'], 'input_ids': torch.concat([torch.zeros(len(padding), dtype=torch.long), self.dataset[:idx+1]['input_ids']])}
+        # return self.dataset[idx-BUFFER_SIZE:idx+1]
+        pixel_values = self.dataset[idx]['pixel_values']
+        # input_ids = self.dataset[idx]['input_ids']
+        return pixel_values
+    
+    def get_random_samples(self, num_samples: int) -> torch.Tensor:
+        index = random.sample(range(len(self.dataset)), 1)
+        return torch.stack([self.__getitem__(index[0] + idx) for idx in range(num_samples)])  # Shape: (num_samples, BUFFER_SIZE+1, 3, H, W)
 
     def get_action_dim(self) -> int:
         return self.action_dim
