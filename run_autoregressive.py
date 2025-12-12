@@ -1,4 +1,5 @@
 import argparse
+import os
 import random
 
 import numpy as np
@@ -103,6 +104,7 @@ def main(model_folder: str) -> None:
     start_indices = [
         random.randint(0, len(dataset) - EPISODE_LENGTH) for _ in range(20)
     ]
+    os.makedirs("logs/rollouts", exist_ok=True)
 
     for start_idx in start_indices:
         # Collate to ge the right tensor dims
@@ -151,6 +153,7 @@ def main(model_folder: str) -> None:
             duration=100,  # 100ms per frame
             loop=0,
         )
+        print(f"Saved logs/rollouts/rollout_{start_idx}.gif")
 
 
 if __name__ == "__main__":

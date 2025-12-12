@@ -22,7 +22,7 @@ import json
 
 def get_ft_vae_decoder() -> AutoencoderKL:
     return AutoencoderKL.from_pretrained(
-        PRETRAINED_MODEL_NAME_OR_PATH, subfolder="vae"
+        "Flaaaande/mario-sd"
     )
 
 def get_model(

@@ -27,7 +27,11 @@ REPO_NAME = "arnaudstiegler/sd-model-gameNgen"
 VALIDATION_PROMPT = "video game doom image, high quality, 4k, high resolution"
 
 # Datasets
+# TRAINING_DATASET_DICT = {
+#     "small": "arnaudstiegler/vizdoom-5-episodes-skipframe-4-lvl5",
+#     "large": "arnaudstiegler/vizdoom-500-episodes-skipframe-4-lvl5",
+# }
+
 TRAINING_DATASET_DICT = {
-    "small": "arnaudstiegler/vizdoom-5-episodes-skipframe-4-lvl5",
-    "large": "arnaudstiegler/vizdoom-500-episodes-skipframe-4-lvl5",
+    "small": "Flaaaande/mario-png-actions",
 }
