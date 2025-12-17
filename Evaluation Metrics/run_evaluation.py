@@ -1,148 +1,179 @@
 """
 Mario Diffusion Model Evaluation Pipeline
-Downloads model from HuggingFace and runs all evaluation metrics
+Uses run_autoregressive.py and run_inference.py for generation
 """
+
+import subprocess
+import sys
+
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q",
+    "torch", "torchvision", "diffusers", "transformers", "accelerate",
+    "datasets", "huggingface_hub", "safetensors",
+    "opencv-python-headless", "scipy", "lpips", "pillow", "tqdm"
+])
+
+sys.path.insert(0, '/content/MarioGPT/GameNGen')
+import numpy as np
+import torch
+from pathlib import Path
+from typing import List, Optional
+import cv2
+import os
+import random
+from PIL import Image
+from tqdm import tqdm
+from diffusers.image_processor import VaeImageProcessor
+
+from mario_eval_metrics import MarioEvaluator
+from mario_image_quality import MarioImageQualityEvaluator
+from adversarial_distribution_eval import AdversarialDistributionEvaluator
+from config_sd import BUFFER_SIZE, CFG_GUIDANCE_SCALE, TRAINING_DATASET_DICT, DEFAULT_NUM_INFERENCE_STEPS
+from dataset import EpisodeDataset, collate_fn, get_single_batch
+from model import load_model
+from run_inference import (
+    decode_and_postprocess,
+    encode_conditioning_frames,
+    next_latent,
+    run_inference_img_conditioning_with_params,
+)
 
 import numpy as np
 import torch
 from pathlib import Path
 from typing import List, Optional
 import cv2
+import os
+import random
+from PIL import Image
+from tqdm import tqdm
+from diffusers.image_processor import VaeImageProcessor
 
-# Import our evaluation modules
 from mario_eval_metrics import MarioEvaluator
 from mario_image_quality import MarioImageQualityEvaluator
 from adversarial_distribution_eval import AdversarialDistributionEvaluator
+from config_sd import BUFFER_SIZE, CFG_GUIDANCE_SCALE, TRAINING_DATASET_DICT, DEFAULT_NUM_INFERENCE_STEPS
+from dataset import EpisodeDataset, collate_fn, get_single_batch
+from model import load_model
+from run_inference import (
+    decode_and_postprocess,
+    encode_conditioning_frames,
+    next_latent,
+    run_inference_img_conditioning_with_params,
+)
 
-
-class MarioDiffusionPipeline:
-    """Load and run inference on the Mario diffusion model"""
+class MarioGenerationPipeline:
+    """Generate frames using the existing model and inference code"""
     
-    def __init__(self, model_id: str = "Flaaaande/mario-sd", device: str = None):
-        self.model_id = model_id
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = None
-        self.vae = None
+    def __init__(self, model_folder: str, device: str = None):
+        self.model_folder = model_folder
+        self.device = device or torch.device(
+            "cuda" if torch.cuda.is_available() 
+            else "mps" if torch.backends.mps.is_available() 
+            else "cpu"
+        )
         self.unet = None
+        self.vae = None
+        self.action_embedding = None
         self.noise_scheduler = None
+        self.tokenizer = None
+        self.text_encoder = None
         
     def load_model(self):
-        """Download and load model from HuggingFace"""
-        from diffusers import AutoencoderKL, UNet2DModel, DDPMScheduler
-        from huggingface_hub import hf_hub_download, snapshot_download
-        
-        print(f"Loading model from {self.model_id}...")
-        
-        # Download full repo
-        model_path = snapshot_download(repo_id=self.model_id)
-        print(f"Model downloaded to: {model_path}")
-        
-        # Load VAE
-        try:
-            self.vae = AutoencoderKL.from_pretrained(
-                model_path, 
-                subfolder="vae"
-            ).to(self.device)
-            print("✓ VAE loaded")
-        except Exception as e:
-            print(f"VAE loading failed: {e}")
-            # Try loading from root config
-            self.vae = AutoencoderKL.from_pretrained(model_path).to(self.device)
-        
-        # Load UNet
-        try:
-            self.unet = UNet2DModel.from_pretrained(
-                model_path,
-                subfolder="unet"
-            ).to(self.device)
-            print("✓ UNet loaded")
-        except Exception as e:
-            print(f"UNet loading issue: {e}")
-        
-        # Load noise scheduler
-        try:
-            self.noise_scheduler = DDPMScheduler.from_pretrained(
-                model_path,
-                subfolder="noise_scheduler"
-            )
-            print("✓ Noise scheduler loaded")
-        except Exception as e:
-            print(f"Scheduler loading issue: {e}")
-            # Default scheduler
-            self.noise_scheduler = DDPMScheduler(num_train_timesteps=1000)
-        
-        self.model_path = model_path
+        """Load model using existing model.py"""
+        print(f"Loading model from {self.model_folder}...")
+        self.unet, self.vae, self.action_embedding, self.noise_scheduler, self.tokenizer, self.text_encoder = load_model(
+            self.model_folder, device=self.device
+        )
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
+        self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
+        print("Model loaded!")
         return self
     
-    def generate_frame(self, num_inference_steps: int = 50, 
-                       guidance_scale: float = 7.5,
-                       seed: Optional[int] = None) -> np.ndarray:
-        """Generate a single Mario frame"""
-        if seed is not None:
-            torch.manual_seed(seed)
-        
-        # Get image size from model config
-        sample_size = getattr(self.unet.config, 'sample_size', 64)
-        in_channels = getattr(self.unet.config, 'in_channels', 4)
-        
-        # Start from random noise
-        latents = torch.randn(
-            (1, in_channels, sample_size, sample_size),
-            device=self.device
+    def generate_single_frame(self, batch: dict) -> np.ndarray:
+        """Generate single frame using run_inference logic"""
+        img = run_inference_img_conditioning_with_params(
+            self.unet,
+            self.vae,
+            self.noise_scheduler,
+            self.action_embedding,
+            self.tokenizer,
+            self.text_encoder,
+            batch,
+            device=self.device,
+            skip_action_conditioning=False,
+            do_classifier_free_guidance=False,
+            guidance_scale=CFG_GUIDANCE_SCALE,
+            num_inference_steps=DEFAULT_NUM_INFERENCE_STEPS,
         )
-        
-        # Set timesteps
-        self.noise_scheduler.set_timesteps(num_inference_steps)
-        
-        # Denoise
-        for t in self.noise_scheduler.timesteps:
-            with torch.no_grad():
-                noise_pred = self.unet(latents, t).sample
-            latents = self.noise_scheduler.step(noise_pred, t, latents).prev_sample
-        
-        # Decode with VAE
-        with torch.no_grad():
-            image = self.vae.decode(latents / self.vae.config.scaling_factor).sample
-        
-        # Convert to numpy image
-        image = (image / 2 + 0.5).clamp(0, 1)
-        image = image.cpu().permute(0, 2, 3, 1).numpy()[0]
-        image = (image * 255).astype(np.uint8)
-        
-        return image
+        return np.array(img)
     
-    def generate_batch(self, n: int, **kwargs) -> np.ndarray:
-        """Generate multiple frames"""
-        frames = []
-        for i in range(n):
-            print(f"Generating frame {i+1}/{n}...", end='\r')
-            frame = self.generate_frame(seed=i, **kwargs)
-            frames.append(frame)
-        print()
-        return np.stack(frames)
+    def generate_rollout(self, actions: list, initial_frame_context: torch.Tensor, 
+                         initial_action_context: torch.Tensor) -> List[np.ndarray]:
+        """Generate rollout using run_autoregressive logic"""
+        all_images = []
+        current_actions = initial_action_context
+        context_latents = initial_frame_context
 
-
-def load_original_mario_frames(path: str = None, n: int = 20) -> np.ndarray:
-    """
-    Load original Mario frames for comparison
-    If no path provided, creates synthetic reference frames
-    """
-    if path and Path(path).exists():
-        frames = []
-        for img_path in sorted(Path(path).glob("*.png"))[:n]:
-            img = cv2.imread(str(img_path))
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            frames.append(img)
-        return np.stack(frames)
+        for i in tqdm(range(len(actions)), desc="Generating rollout"):
+            target_latents = next_latent(
+                unet=self.unet,
+                vae=self.vae,
+                noise_scheduler=self.noise_scheduler,
+                action_embedding=self.action_embedding,
+                context_latents=context_latents.unsqueeze(0),
+                device=self.device,
+                skip_action_conditioning=False,
+                do_classifier_free_guidance=False,
+                guidance_scale=CFG_GUIDANCE_SCALE,
+                num_inference_steps=DEFAULT_NUM_INFERENCE_STEPS,
+                actions=current_actions.unsqueeze(0),
+            )
+            
+            current_actions = torch.cat([
+                current_actions[(-BUFFER_SIZE + 1):],
+                torch.tensor([actions[i]]).to(self.device),
+            ])
+            context_latents = torch.cat([context_latents[(-BUFFER_SIZE + 1):], target_latents], dim=0)
+            
+            img = decode_and_postprocess(
+                vae=self.vae, image_processor=self.image_processor, latents=target_latents
+            )
+            all_images.append(np.array(img))
+        
+        return all_images
     
-    # Create synthetic reference frames (replace with real data)
-    print("Warning: Using synthetic reference frames. Provide real Mario frames for accurate eval.")
-    frames = np.zeros((n, 240, 256, 3), dtype=np.uint8)
-    for i in range(n):
-        frames[i, 200:240, :] = [172, 124, 0]   # Ground
-        frames[i, 0:180, :] = [92, 148, 252]    # Sky
-        frames[i, 180:200, 100:120] = [56, 204, 108]  # Pipe
-    return frames
+    def generate_batch_from_dataset(self, n_samples: int, dataset_name: str = None) -> np.ndarray:
+        """Generate multiple frames from dataset"""
+        dataset_name = dataset_name or TRAINING_DATASET_DICT["small"]
+        dataset = EpisodeDataset(dataset_name)
+        
+        generated_frames = []
+        indices = random.sample(range(BUFFER_SIZE, len(dataset)), min(n_samples, len(dataset) - BUFFER_SIZE))
+        
+        for idx in tqdm(indices, desc="Generating frames"):
+            batch = collate_fn([dataset[idx]])
+            img = self.generate_single_frame(batch)
+            generated_frames.append(img)
+        
+        return np.stack(generated_frames)
+    
+    def get_original_frames_from_dataset(self, n_samples: int, dataset_name: str = None) -> np.ndarray:
+        """Get original frames from dataset for comparison"""
+        dataset_name = dataset_name or TRAINING_DATASET_DICT["small"]
+        dataset = EpisodeDataset(dataset_name)
+        
+        original_frames = []
+        indices = random.sample(range(BUFFER_SIZE, len(dataset)), min(n_samples, len(dataset) - BUFFER_SIZE))
+        
+        for idx in indices:
+            batch = collate_fn([dataset[idx]])
+            # Get target frame (last frame in buffer)
+            img_tensor = batch["pixel_values"][0, -1]  # Shape: (3, H, W)
+            # Denormalize: from [-1, 1] to [0, 255]
+            img = ((img_tensor.permute(1, 2, 0).numpy() + 1) * 127.5).astype(np.uint8)
+            original_frames.append(img)
+        
+        return np.stack(original_frames)
 
 
 def run_full_evaluation(generated: np.ndarray, original: np.ndarray):
@@ -152,7 +183,7 @@ def run_full_evaluation(generated: np.ndarray, original: np.ndarray):
     print("MARIO DIFFUSION MODEL EVALUATION")
     print("=" * 60)
     
-    # Resize if dimensions don't match
+    # Resize if needed
     if generated.shape[1:3] != original.shape[1:3]:
         print(f"Resizing generated {generated.shape} to match original {original.shape}")
         resized = []
@@ -161,14 +192,14 @@ def run_full_evaluation(generated: np.ndarray, original: np.ndarray):
             resized.append(r)
         generated = np.stack(resized)
     
-    # 1. Visual Fidelity (from mario_eval_metrics.py)
+    # 1. Visual Fidelity
     print("\n[1/3] Visual Fidelity Metrics...")
     eval1 = MarioEvaluator()
     visual_results = eval1.evaluate_visual_fidelity(original, generated)
     print(f"  PSNR: {visual_results['psnr_mean']:.2f} dB")
     print(f"  LPIPS: {visual_results.get('lpips_mean', 'N/A')}")
     
-    # 2. Image Quality (from mario_image_quality.py)
+    # 2. Image Quality
     print("\n[2/3] Image Quality Metrics...")
     eval2 = MarioImageQualityEvaluator()
     quality_results = eval2.evaluate_batch(original, generated)
@@ -176,7 +207,7 @@ def run_full_evaluation(generated: np.ndarray, original: np.ndarray):
     print(f"  Histogram Similarity: {quality_results['histogram_similarity_mean']:.4f}")
     print(f"  Edge Similarity: {quality_results['edge_similarity_mean']:.4f}")
     
-    # 3. Distribution Shift (from adversarial_distribution_eval.py)
+    # 3. Distribution Shift
     print("\n[3/3] Distribution Shift Metrics...")
     eval3 = AdversarialDistributionEvaluator()
     dist_results = eval3.evaluate_distribution_shift(original, generated)
@@ -185,7 +216,6 @@ def run_full_evaluation(generated: np.ndarray, original: np.ndarray):
     print(f"  KL Divergence: {dist_results['kl_divergence_mean']:.4f}")
     print(f"  Wasserstein: {dist_results['wasserstein_mean']:.4f}")
     
-    # Combined results
     all_results = {
         "visual_fidelity": visual_results,
         "image_quality": quality_results,
@@ -194,40 +224,34 @@ def run_full_evaluation(generated: np.ndarray, original: np.ndarray):
     
     return all_results
 
+# ===== CONFIGURATION - EDIT THESE =====
+MODEL_FOLDER = "Flaaaande/mario-sd"  # Change to your model path
+N_SAMPLES = 20
+DATASET = None  # Uses default dataset
 
-# ==================== MAIN ====================
+# Initialize pipeline
+pipeline = MarioGenerationPipeline(model_folder=MODEL_FOLDER)
+pipeline.load_model()
 
-if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Evaluate Mario Diffusion Model")
-    parser.add_argument("--model", default="Flaaaande/mario-sd", help="HuggingFace model ID")
-    parser.add_argument("--original-frames", default=None, help="Path to original Mario frames")
-    parser.add_argument("--n-samples", type=int, default=10, help="Number of frames to generate")
-    parser.add_argument("--steps", type=int, default=50, help="Inference steps")
-    args = parser.parse_args()
-    
-    # Load model
-    pipeline = MarioDiffusionPipeline(model_id=args.model)
-    pipeline.load_model()
-    
-    # Generate frames
-    print(f"\nGenerating {args.n_samples} frames...")
-    generated = pipeline.generate_batch(args.n_samples, num_inference_steps=args.steps)
-    print(f"Generated shape: {generated.shape}")
-    
-    # Save some samples
-    Path("generated_samples").mkdir(exist_ok=True)
-    for i, frame in enumerate(generated[:5]):
-        cv2.imwrite(f"generated_samples/gen_{i}.png", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-    print("Saved sample frames to generated_samples/")
-    
-    # Load original frames
-    original = load_original_mario_frames(args.original_frames, args.n_samples)
-    
-    # Run evaluation
-    results = run_full_evaluation(generated, original)
-    
-    print("\n" + "=" * 60)
-    print("EVALUATION COMPLETE")
-    print("=" * 60)
+# Generate frames
+print(f"\nGenerating {N_SAMPLES} frames...")
+generated = pipeline.generate_batch_from_dataset(N_SAMPLES, DATASET)
+print(f"Generated shape: {generated.shape}")
+
+# Get original frames
+print(f"Loading {N_SAMPLES} original frames...")
+original = pipeline.get_original_frames_from_dataset(N_SAMPLES, DATASET)
+print(f"Original shape: {original.shape}")
+
+# Save samples
+Path("generated_samples").mkdir(exist_ok=True)
+for i, frame in enumerate(generated[:5]):
+    cv2.imwrite(f"generated_samples/gen_{i}.png", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+print("Saved sample frames to generated_samples/")
+
+# Run evaluation
+results = run_full_evaluation(generated, original)
+
+print("\n" + "=" * 60)
+print("EVALUATION COMPLETE")
+print("=" * 60)
