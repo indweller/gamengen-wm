@@ -5,7 +5,7 @@ Evaluates trained agent and generates visualizations.
 - Learning curve with state coloring
 - Belief evolution over time
 - State distribution analysis
-- Flow zone percentage (target: >60%)
+- Flow zone percentage
 """
 
 import sys
