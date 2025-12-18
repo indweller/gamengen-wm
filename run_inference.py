@@ -20,9 +20,9 @@ from config_sd import (
 from dataset import get_single_batch
 from model import load_model
 
-torch.manual_seed(9052924)
-np.random.seed(9052924)
-random.seed(9052924)
+# torch.manual_seed(9052924)
+# np.random.seed(9052924)
+# random.seed(9052924)
 
 
 def encode_conditioning_frames(

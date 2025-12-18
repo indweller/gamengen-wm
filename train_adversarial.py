@@ -14,6 +14,8 @@ from tqdm import tqdm
 from huggingface_hub import snapshot_download, hf_hub_download
 from safetensors.torch import load_file
 from diffusers import UNet2DConditionModel, AutoencoderKL, DDIMScheduler
+from PIL import Image
+import imageio
 
 from stable_baselines3 import PPO
 from gymnasium import spaces
@@ -34,6 +36,7 @@ from wandb.integration.sb3 import WandbCallback
 
 from custom_extractor import MarioCNN
 from diffusion_env import DiffusionEnv
+from model import load_model
 from reward_model import RewardModel
 from latent_adversary import LatentAdversary
 from dataset import LatentDataset
@@ -51,8 +54,8 @@ DEFAULT_CONFIG = {
     },
     "adversary": {
         "epsilon": 0.5,
-        "alpha": 0.0,
-        "steps": 0,
+        "alpha": 0.1,
+        "steps": 100,
     },
     "ppo": {
         "n_steps": 2048,
@@ -79,71 +82,23 @@ DEFAULT_CONFIG = {
     },
 }
 
-def load_frozen_world_model(model_folder: str, device: torch.device):
-    """
-    Replicates the logic from model.py to load the models.
-    """
-    print(f"Loading World Model from {model_folder}...")
+COMPLEX_MOVEMENT = [
+    ['NOOP'],
+    ['right'],
+    ['right', 'A'],
+    ['right', 'B'],
+    ['right', 'A', 'B'],
+    ['A'],
+    ['left'],
+    ['left', 'A'],
+    ['left', 'B'],
+    ['left', 'A', 'B'],
+    ['down'],
+    ['up'],
+]
 
-    if not os.path.isdir(model_folder):
-        print(f"'{model_folder}' looks like a Repo ID. Checking cache/downloading...")
-        try:
-            model_path = snapshot_download(repo_id=model_folder, revision="main", allow_patterns=["*"])
-        except Exception as e:
-            print(f"Could not download from Hub. Assuming '{model_folder}' is a local path.")
-            model_path = model_folder
-    else:
-        model_path = model_folder
-
-    print(f"Loading from local path: {model_path}")
-
-    info_path = os.path.join(model_path, "embedding_info.json")    
-    with open(info_path, "r") as f:
-        embedding_info = json.load(f)
-
-    action_embedding = torch.nn.Embedding(
-        num_embeddings=embedding_info["num_embeddings"], 
-        embedding_dim=embedding_info["embedding_dim"]
-    ).to(device)
-    
-    embed_path = os.path.join(model_path, "action_embedding_model.safetensors")
-    action_embedding.load_state_dict(load_file(embed_path))
-    
-    noise_scheduler = DDIMScheduler.from_pretrained(
-        model_path, 
-        subfolder="noise_scheduler", 
-        local_files_only=True
-    )
-    
-    assert (
-        noise_scheduler.config.prediction_type == "v_prediction"
-    ), "Noise scheduler prediction type should be 'v_prediction'"
-    
-    # load vae FROM ROOT
-    # Removing 'subfolder="vae"' forces it to look for config.json 
-    # and diffusion_pytorch_model.safetensors in 'model_path' root.
-    vae = AutoencoderKL.from_pretrained(
-        model_path, 
-        subfolder=None,
-        local_files_only=True,
-        low_cpu_mem_usage=False
-    )
-    # load unet from different model_path
-    # model_path = snapshot_download(repo_id="Flaaaande/sd-model-mario", revision="main", allow_patterns=["*"])
-    unet = UNet2DConditionModel.from_pretrained(
-        model_path, 
-        subfolder="unet", 
-        local_files_only=True,
-        low_cpu_mem_usage=False
-    )
-
-    components = [unet, vae, action_embedding]
-    for comp in components:
-        comp.eval()
-        comp.to(device)
-        comp.requires_grad_(False)
-        
-    return unet, vae, noise_scheduler, action_embedding
+# concat strings with '+' to form action names
+COMPLEX_ACTIONS = ['+'.join(COMPLEX_MOVEMENT[i]) for i in range(len(COMPLEX_MOVEMENT))]
 
 class ProgressBarCallback(BaseCallback):
     def __init__(self, pbar):
@@ -446,27 +401,15 @@ if __name__ == "__main__":
     print(f"Loading Dataset from {CONFIG['env']['dataset_path']}...")
     dataset = LatentDataset(dataset_name=CONFIG["env"]["dataset_path"])
     
-    print("Loading Frozen World Models (VAE, Diffusion, Reward)...")
-    unet, vae, scheduler, action_embedding = load_frozen_world_model(args.model_folder, device)
-    reward_model = RewardModel(input_dim=14400).to(device).eval()
-    # reward_model_path = os.path.join(args.model_folder, "reward_model.safetensors")
-    # if not os.path.exists(reward_model_path):
-    #     reward_model_path = hf_hub_download(repo_id=args.model_folder, filename="reward_model.safetensors", repo_type="model")
-    # reward_model.load_state_dict(load_file(reward_model_path))
-
-    # sakshamrig/smb-mlp has the reward model wweights as pickle, so load weights accordingly
-    # saved as torch.save({
-    #     "reg_head": reg_head.state_dict(),
-    #     "cls_head": cls_head.state_dict(),
-    #     "in_dim": in_dim,
-    # }, "smb_mlp.pt")
-    reward_model_path = os.path.join("/home/prashanth/projects/gamengen-wm/smb_mlp.pt")
-    reward_state = torch.load(reward_model_path, map_location=device)
-    reward_model.reg_head.load_state_dict(reward_state["reg_head"])
-    reward_model.cls_head.load_state_dict(reward_state["cls_head"])
-
-    reward_model.eval()
+    print("Loading World Model - VAE, Diffusion, Reward...")
+    unet, vae, action_embedding, scheduler, _, _ = load_model(args.model_folder, device)
+    unet.requires_grad_(False)
+    vae.requires_grad_(False)
+    action_embedding.requires_grad_(False)
+    reward_model = RewardModel()
+    reward_model.load_from_hf(device)
     reward_model.to(device)
+    
     for param in reward_model.parameters():
         param.requires_grad = False
             
@@ -492,31 +435,17 @@ if __name__ == "__main__":
     
     eval_obs = train_env.reset()
     frames = []
-    for i in range(3):
+    for i in range(100):
         action = train_env.action_space.sample()
+        print("Action:", COMPLEX_ACTIONS[action])
         eval_obs, reward, done, info = train_env.step([action])
-        print(eval_obs[0].min(), eval_obs[0].max())
+        print("Step:", i, "Reward:", reward, "Done:", done)
         frame = eval_obs[0]
-        # save first frame as img
-        if i == 1:
-            from PIL import Image
-            img = Image.fromarray(frame[:, :, :3].astype(np.uint8))
-            img.save("first_frame_adv.png")
-            img = Image.fromarray(frame[:, :, 3:6].astype(np.uint8))
-            img.save("second_frame_adv.png")
-            img = Image.fromarray(frame[:, :, 6:9].astype(np.uint8))
-            img.save("third_frame_adv.png")
-            img = Image.fromarray(frame[:, :, 9:12].astype(np.uint8))
-            img.save("fourth_frame_adv.png")
-        # break
-        frames.extend([frame[:, :, :3], frame[:, :, 3:6], frame[:, :, 6:9], frame[:, :, 9:12]])
-        if done:
-            break
-    # save frames as gif
-    import imageio
-    imageio.mimwrite("test_rollout.gif", frames, fps=20)    
+        if i == 0:
+           frames.extend([frame[:, :, :3], frame[:, :, 3:6], frame[:, :, 6:9]])
+        frames.append(frame[:, :, 9:12])
+    imageio.mimwrite("logs/rollouts/rollout.gif", frames, fps=10)    
 
-    exit(0)
     # Eval env uses same config but could be tweaked if needed
     eval_env = build_vec_env(CONFIG, frozen_models, dataset, adversary, device)
 
