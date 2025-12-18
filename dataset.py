@@ -81,10 +81,16 @@ class LatentDataset:
         pixel_values = self.dataset[idx]['pixel_values']
         # input_ids = self.dataset[idx]['input_ids']
         return pixel_values
-    
-    def get_random_samples(self, num_samples: int) -> torch.Tensor:
-        index = random.sample(range(len(self.dataset)), 1)
-        return torch.stack([self.__getitem__(index[0] + idx) for idx in range(num_samples)])  # Shape: (num_samples, BUFFER_SIZE+1, 3, H, W)
+        
+    def get_random_samples(self, num_samples: int) -> tuple[torch.Tensor, torch.Tensor]:
+        max_start_index = len(self.dataset) - num_samples
+        start_idx = random.randint(0, max_start_index)
+
+        batch = self.dataset[start_idx : start_idx + num_samples]
+        pixel_values = torch.stack(batch['pixel_values'])
+        input_ids = batch['input_ids']
+
+        return pixel_values, input_ids # Shape: (num_samples, 3, H, W)
 
     def get_action_dim(self) -> int:
         return self.action_dim
