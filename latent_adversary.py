@@ -21,47 +21,28 @@ class LatentAdversary:
             param.requires_grad = False
         self.rew.eval()
 
-    def generate_tension_state(self, z_stack):
-        """
-        Takes a valid history stack and perturbs it to maximize 'Tension'.
-        Target: P(Done) = 0.5
-        """
-        # z_adv shape: (Batch, Seq_Len, Latent_Dim)
-        z_adv = z_stack.clone().detach()
+    def get_adversarial_state(self, z_stack, target_prob=0.001):
+        z_stack = z_stack.detach()
+        z_adv = z_stack.clone()
         z_adv.requires_grad = True
 
         for _ in range(self.num_steps):
-            # Output shape assumption: (Batch, 1) or (Batch, 2)
-            _, logit_done = self.rew(z_adv)
-            prob_done = F.sigmoid(logit_done)
-            print("Prob done:", prob_done.item())
-            # if prob_done.item() < 0.0001:
-            #     z_adv.requires_grad = False
-            #     break
-
-            loss = (prob_done - 0.0001).pow(2).mean()
+            prob_done = self.rew(z_adv)[1] 
+            # print("Predicted done probabilities:", prob_done)
+            loss = (prob_done - target_prob).pow(2).mean()
             
             self.rew.zero_grad()
             loss.backward()
             
-            # gradients w.r.t z_adv - .sign() for standard PGD (L-inf optimization)
             with torch.no_grad():
                 grad = z_adv.grad
-                print(grad[:5])
-                print(z_adv[:5])
-                print("L2 norm before update:", torch.norm(z_adv).item())
-                z_adv -= self.alpha * grad
+                z_adv -= self.alpha * grad.sign()
+                delta = torch.clamp(z_adv - z_stack, -self.epsilon, self.epsilon)
+                z_adv.copy_(z_stack + delta)
                 
-                # # Clip the perturbation to stay within epsilon of the original real data
-                # perturbation = torch.clamp(z_adv - z_stack, -self.epsilon, self.epsilon)
-                # print(perturbation[:5])
-                # print("L2 norm before perturbation:", torch.norm(z_adv).item())
-                # print("L2 norm of perturbation:", torch.norm(perturbation).item())
-                # z_adv.copy_(z_stack + perturbation)
-                print("L2 norm after projection:", torch.norm(z_adv).item())
-                print(z_adv[:5])
-                
-            # Reset gradients for next step
             z_adv.grad.zero_()
-        print("---")
+        
+        with torch.no_grad():
+            print("Final adversarial done probabilities:", self.rew(z_adv)[1])
+
         return z_adv.detach()
