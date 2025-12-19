@@ -25,7 +25,6 @@ class MetricsCollector:
         self.max_size = max_size
         self.window_size = window_size
 
-        # Buffer to store episode metrics
         self.buffer = deque(maxlen=max_size)
 
     def add_episode(self, metrics: Dict[str, Any]):
@@ -114,7 +113,6 @@ class MetricsCollector:
         rewards = [ep['reward'] for ep in recent]
         x = np.arange(len(rewards))
 
-        # Linear regression
         slope, _, _, _, _ = stats.linregress(x, rewards)
 
         return slope
