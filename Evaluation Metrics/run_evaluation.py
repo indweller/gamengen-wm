@@ -37,30 +37,6 @@ from run_inference import (
     run_inference_img_conditioning_with_params,
 )
 
-import numpy as np
-import torch
-from pathlib import Path
-from typing import List, Optional
-import cv2
-import os
-import random
-from PIL import Image
-from tqdm import tqdm
-from diffusers.image_processor import VaeImageProcessor
-
-from mario_eval_metrics import MarioEvaluator
-from mario_image_quality import MarioImageQualityEvaluator
-from adversarial_distribution_eval import AdversarialDistributionEvaluator
-from config_sd import BUFFER_SIZE, CFG_GUIDANCE_SCALE, TRAINING_DATASET_DICT, DEFAULT_NUM_INFERENCE_STEPS
-from dataset import EpisodeDataset, collate_fn, get_single_batch
-from model import load_model
-from run_inference import (
-    decode_and_postprocess,
-    encode_conditioning_frames,
-    next_latent,
-    run_inference_img_conditioning_with_params,
-)
-
 class MarioGenerationPipeline:
     """Generate frames using the existing model and inference code"""
     
@@ -167,9 +143,7 @@ class MarioGenerationPipeline:
         
         for idx in indices:
             batch = collate_fn([dataset[idx]])
-            # Get target frame (last frame in buffer)
-            img_tensor = batch["pixel_values"][0, -1]  # Shape: (3, H, W)
-            # Denormalize: from [-1, 1] to [0, 255]
+            img_tensor = batch["pixel_values"][0, -1] 
             img = ((img_tensor.permute(1, 2, 0).numpy() + 1) * 127.5).astype(np.uint8)
             original_frames.append(img)
         
@@ -183,7 +157,6 @@ def run_full_evaluation(generated: np.ndarray, original: np.ndarray):
     print("MARIO DIFFUSION MODEL EVALUATION")
     print("=" * 60)
     
-    # Resize if needed
     if generated.shape[1:3] != original.shape[1:3]:
         print(f"Resizing generated {generated.shape} to match original {original.shape}")
         resized = []
@@ -192,14 +165,12 @@ def run_full_evaluation(generated: np.ndarray, original: np.ndarray):
             resized.append(r)
         generated = np.stack(resized)
     
-    # 1. Visual Fidelity
     print("\n[1/3] Visual Fidelity Metrics...")
     eval1 = MarioEvaluator()
     visual_results = eval1.evaluate_visual_fidelity(original, generated)
     print(f"  PSNR: {visual_results['psnr_mean']:.2f} dB")
     print(f"  LPIPS: {visual_results.get('lpips_mean', 'N/A')}")
     
-    # 2. Image Quality
     print("\n[2/3] Image Quality Metrics...")
     eval2 = MarioImageQualityEvaluator()
     quality_results = eval2.evaluate_batch(original, generated)
@@ -207,7 +178,6 @@ def run_full_evaluation(generated: np.ndarray, original: np.ndarray):
     print(f"  Histogram Similarity: {quality_results['histogram_similarity_mean']:.4f}")
     print(f"  Edge Similarity: {quality_results['edge_similarity_mean']:.4f}")
     
-    # 3. Distribution Shift
     print("\n[3/3] Distribution Shift Metrics...")
     eval3 = AdversarialDistributionEvaluator()
     dist_results = eval3.evaluate_distribution_shift(original, generated)
@@ -224,32 +194,26 @@ def run_full_evaluation(generated: np.ndarray, original: np.ndarray):
     
     return all_results
 
-# ===== CONFIGURATION - EDIT THESE =====
-MODEL_FOLDER = "Flaaaande/mario-sd"  # Change to your model path
-N_SAMPLES = 20
-DATASET = None  # Uses default dataset
+MODEL_FOLDER = "Flaaaande/mario-sd" 
+N_SAMPLES = 1000
+DATASET = None  
 
-# Initialize pipeline
 pipeline = MarioGenerationPipeline(model_folder=MODEL_FOLDER)
 pipeline.load_model()
 
-# Generate frames
 print(f"\nGenerating {N_SAMPLES} frames...")
 generated = pipeline.generate_batch_from_dataset(N_SAMPLES, DATASET)
 print(f"Generated shape: {generated.shape}")
 
-# Get original frames
 print(f"Loading {N_SAMPLES} original frames...")
 original = pipeline.get_original_frames_from_dataset(N_SAMPLES, DATASET)
 print(f"Original shape: {original.shape}")
 
-# Save samples
 Path("generated_samples").mkdir(exist_ok=True)
 for i, frame in enumerate(generated[:5]):
     cv2.imwrite(f"generated_samples/gen_{i}.png", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
 print("Saved sample frames to generated_samples/")
 
-# Run evaluation
 results = run_full_evaluation(generated, original)
 
 print("\n" + "=" * 60)
