@@ -11,7 +11,7 @@ from . import metrics_collector
 from . import t_score
 from . import hmm_controller
 from . import level_generator
-from . import mario_env_wrapper
+from . import mario_env
 
 __all__ = [
     "utils",
@@ -19,5 +19,5 @@ __all__ = [
     "t_score",
     "hmm_controller",
     "level_generator",
-    "mario_env_wrapper",
+    "mario_env",
 ]
