@@ -1,178 +1,227 @@
 """
 HMM Controller for Dynamic Difficulty Adjustment
-Implements Hidden Markov Model for tracking and adapting difficulty
+
+Implements Hidden Markov Model for tracking player skill and adapting difficulty.
+
+Three States (per framework):
+- Low (S0): Easy difficulty - few enemies, no gaps, confidence building
+- Transition (S1): ASSESSMENT state - gauges player skill via thresholds
+- High (S2): Hard difficulty - many enemies, gaps, mastery challenge
+
+Key insight: Transition is NOT medium difficulty. It's a decision point where
+the HMM observes player performance to decide whether to go Low or High.
 """
 
 import json
+import numpy as np
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
-import numpy as np
-from scipy.stats import norm
+from collections import Counter
 
 
 class HMM_DDA:
     """
-    Hidden Markov Model for Dynamic Difficulty Adjustment
-
+    Hidden Markov Model for Dynamic Difficulty Adjustment.
+    
     States: S = {Low, Transition, High}
     Observations: T-score ∈ [0, 1]
-    Transition matrix: A (3x3)
-    Emission distributions: Gaussian p(T|s) ~ N(μ_s, σ_s)
+    
+    The Transition state has LOWER self-loop probability (0.40 vs 0.70)
+    because it's an assessment state - it should quickly decide whether
+    the player belongs in Low or High difficulty.
     """
-
-    def __init__(self, config_path: str):
+    
+    def __init__(self, config_path: Optional[str] = None):
         """
-        Initialize HMM controller
-
+        Initialize HMM controller.
+        
         Args:
-            config_path: Path to directory containing config JSON files
+            config_path: Path to config directory (optional)
         """
-        self.config_path = Path(config_path)
-
-        # State definitions
         self.state_names = ["Low", "Transition", "High"]
-        self.n_states = len(self.state_names)
-
-        # Load parameters from config files
-        self._load_parameters()
-
-        # Initialize belief to start in Low state
+        self.n_states = 3
+        
+        if config_path and Path(config_path).exists():
+            self._load_parameters(config_path)
+        else:
+            self._set_default_parameters()
+        
         self.belief = np.array([1.0, 0.0, 0.0])
+        
+        self.state_history: List[str] = []
+        self.belief_history: List[np.ndarray] = []
+        self.t_score_history: List[float] = []
+    
+    def _set_default_parameters(self):
+        """Set default HMM parameters from framework"""
+        self.A = np.array([
+            [0.70, 0.25, 0.05],  # Low: stays easy, sometimes assesses
+            [0.20, 0.40, 0.40],  # Transition: LOW self-loop, decides quickly
+            [0.05, 0.25, 0.70]   # High: stays hard, sometimes drops
+        ])
+        
 
-        # History tracking
-        self.state_history = []
-        self.belief_history = []
-        self.t_score_history = []
-
-    def _load_parameters(self):
-        """Load HMM parameters from config files"""
-
-        # Load transition matrix
-        with open(self.config_path / 'transition_matrix.json', 'r') as f:
-            transition_data = json.load(f)
-            self.A = np.array(transition_data['matrix'])
-
-        # Load emission parameters (μ, σ for each state)
-        with open(self.config_path / 'emission_params.json', 'r') as f:
-            emission_data = json.load(f)
-            self.emission_params = [
-                (emission_data['Low']['mu'], emission_data['Low']['sigma']),
-                (emission_data['Transition']['mu'], emission_data['Transition']['sigma']),
-                (emission_data['High']['mu'], emission_data['High']['sigma'])
-            ]
-
-        # Load prompts for each state
-        with open(self.config_path / 'prompts.json', 'r') as f:
-            prompts_data = json.load(f)
-            self.prompts = prompts_data
-
-        print(f"Loaded HMM parameters from {self.config_path}")
-        print(f"Transition matrix:\n{self.A}")
-        print(f"Emission params: {self.emission_params}")
-
+        self.emission_params = [
+            (0.25, 0.15), 
+            (0.50, 0.12),  
+            (0.75, 0.15),  
+        ]
+        
+        self.prompts = {
+            'Low': "few enemies, no gaps, many pipes, low elevation, easy difficulty",
+            'Transition': "varied challenges, mixed enemy density, unpredictable patterns, some gaps, skill assessment",
+            'High': "many enemies, many gaps, few pipes, high elevation, hard difficulty"
+        }
+        
+        self.thresholds = {
+            'low_transition': 0.35,   # Below this → Low signal
+            'transition_high': 0.65,  # Above this → High signal
+        }
+    
+    def _load_parameters(self, config_path: str):
+        """Load parameters from config files"""
+        config_path = Path(config_path)
+        
+        trans_file = config_path / 'transition_matrix.json'
+        if trans_file.exists():
+            with open(trans_file) as f:
+                data = json.load(f)
+                self.A = np.array(data['matrix'])
+        else:
+            self._set_default_parameters()
+            return
+        
+        emit_file = config_path / 'emission_params.json'
+        if emit_file.exists():
+            with open(emit_file) as f:
+                data = json.load(f)
+                self.emission_params = [
+                    (data['Low']['mu'], data['Low']['sigma']),
+                    (data['Transition']['mu'], data['Transition']['sigma']),
+                    (data['High']['mu'], data['High']['sigma'])
+                ]
+        
+        prompts_file = config_path / 'prompts.json'
+        if prompts_file.exists():
+            with open(prompts_file) as f:
+                self.prompts = json.load(f)
+        else:
+            self.prompts = {
+                'Low': "few enemies, no gaps, many pipes, low elevation",
+                'Transition': "varied challenges, mixed density, skill assessment",
+                'High': "many enemies, many gaps, few pipes, high elevation"
+            }
+        
+        thresh_file = config_path / 'thresholds.json'
+        if thresh_file.exists():
+            with open(thresh_file) as f:
+                self.thresholds = json.load(f)
+        else:
+            self.thresholds = {'low_transition': 0.35, 'transition_high': 0.65}
+        
+        print(f"Loaded HMM parameters from {config_path}")
+    
     def gaussian_pdf(self, x: float, mu: float, sigma: float) -> float:
-        """
-        Compute Gaussian probability density
-
-        Args:
-            x: Observation value
-            mu: Mean
-            sigma: Standard deviation
-
-        Returns:
-            Probability density
-        """
-        return norm.pdf(x, loc=mu, scale=sigma)
-
-    def predict(self) -> np.ndarray:
-        """
-        Prediction step: Apply transition matrix to current belief
-
-        Returns:
-            Predicted belief distribution
-        """
-        predicted_belief = self.belief @ self.A
-        return predicted_belief
-
+        """Compute Gaussian probability density"""
+        return np.exp(-0.5 * ((x - mu) / sigma) ** 2) / (sigma * np.sqrt(2 * np.pi))
+    
     def update(self, T_score: float) -> str:
         """
-        Full Bayes update: Predict → Observe → Update belief
-
+        Full Bayesian update: Predict → Observe → Update.
+        
+        This is the core HMM step from the framework (Section 6.1).
+        
         Args:
-            T_score: Observed T-score in [0, 1]
-
+            T_score: Observed performance score in [0, 1]
+            
         Returns:
-            New current state name
+            New state name (argmax of belief)
         """
-        # Step 1: Prediction
-        predicted_belief = self.predict()
-
-        # Step 2: Observation (emission probabilities)
+        predicted = self.belief @ self.A
+        
         emissions = np.array([
             self.gaussian_pdf(T_score, mu, sigma)
             for mu, sigma in self.emission_params
         ])
-
-        # Step 3: Bayes update
-        posterior = predicted_belief * emissions
-
-        # Normalize to get probability distribution
+        
+        posterior = predicted * emissions
+        
         if posterior.sum() > 0:
             self.belief = posterior / posterior.sum()
         else:
-            # If all probabilities are 0 (very unlikely), keep previous belief
-            self.belief = predicted_belief
-
-        # Update history
-        self.state_history.append(self.get_current_state())
+            self.belief = predicted  
+        
+        current_state = self.get_current_state()
+        self.state_history.append(current_state)
         self.belief_history.append(self.belief.copy())
         self.t_score_history.append(T_score)
-
-        return self.get_current_state()
-
+        
+        return current_state
+    
     def get_current_state(self) -> str:
-        """
-        Get current state (argmax of belief)
-
-        Returns:
-            State name
-        """
-        state_idx = np.argmax(self.belief)
-        return self.state_names[state_idx]
-
+        """Get current state (argmax of belief)"""
+        return self.state_names[np.argmax(self.belief)]
+    
     def get_belief(self) -> np.ndarray:
-        """
-        Get current belief distribution
-
-        Returns:
-            Array of probabilities [P(Low), P(Transition), P(High)]
-        """
+        """Get current belief distribution"""
         return self.belief.copy()
-
+    
     def get_prompt(self) -> str:
+        """Get MarioGPT prompt for current state"""
+        return self.prompts[self.get_current_state()]
+    
+    def get_state_distribution(self) -> Dict[str, float]:
+        """Get percentage of time spent in each state"""
+        if not self.state_history:
+            return {s: 0.0 for s in self.state_names}
+        
+        counts = Counter(self.state_history)
+        total = len(self.state_history)
+        return {s: counts.get(s, 0) / total for s in self.state_names}
+    
+    def get_transition_frequency(self, window: int = 100) -> float:
+        """Get transitions per 100 episodes (measure of stability)"""
+        if len(self.state_history) < 2:
+            return 0.0
+        
+        recent = self.state_history[-window:]
+        transitions = sum(1 for i in range(1, len(recent)) if recent[i] != recent[i-1])
+        return transitions * (100 / len(recent))
+    
+    def adapt_transition_matrix(self, window: int = 100):
         """
-        Get MarioGPT prompt for current state
-
-        Returns:
-            Text prompt for level generation
+        Adapt transition matrix to prevent oscillation or stagnation.
+        (From PDF Section 8: Tuning Guide)
         """
-        current_state = self.get_current_state()
-        return self.prompts[current_state]
-
+        if len(self.state_history) < window:
+            return
+        
+        recent = self.state_history[-window:]
+        transitions = sum(1 for i in range(1, len(recent)) if recent[i] != recent[i-1])
+        
+        if transitions > 30:
+            print(f"Detected oscillation ({transitions} transitions). Increasing stability.")
+            for i in range(self.n_states):
+                self.A[i, i] = min(0.90, self.A[i, i] * 1.1)
+            self.A = self.A / self.A.sum(axis=1, keepdims=True)
+        
+        if len(set(recent)) == 1 and len(self.t_score_history) >= 50:
+            t_std = np.std(self.t_score_history[-50:])
+            if t_std > 0.15:
+                print(f"Detected stagnation (T-score std={t_std:.3f}). Increasing sensitivity.")
+                for i in range(self.n_states):
+                    self.A[i, i] = max(0.40, self.A[i, i] * 0.9)
+                self.A = self.A / self.A.sum(axis=1, keepdims=True)
+    
     def reset(self):
-        """Reset belief to initial state (Low)"""
+        """Reset HMM to initial state"""
         self.belief = np.array([1.0, 0.0, 0.0])
         self.state_history = []
         self.belief_history = []
         self.t_score_history = []
-
+    
     def save_state(self, filepath: str):
-        """
-        Save current HMM state to file
-
-        Args:
-            filepath: Path to save JSON file
-        """
+        """Save HMM state to JSON"""
         state_data = {
             'belief': self.belief.tolist(),
             'state_history': self.state_history,
@@ -180,195 +229,57 @@ class HMM_DDA:
             't_score_history': self.t_score_history,
             'transition_matrix': self.A.tolist(),
             'emission_params': [
-                {'mu': mu, 'sigma': sigma}
+                {'mu': float(mu), 'sigma': float(sigma)}
                 for mu, sigma in self.emission_params
             ]
         }
-
+        
         Path(filepath).parent.mkdir(parents=True, exist_ok=True)
-
         with open(filepath, 'w') as f:
             json.dump(state_data, f, indent=2)
-
-        print(f"Saved HMM state to {filepath}")
-
+    
     def load_state(self, filepath: str):
-        """
-        Load HMM state from file
-
-        Args:
-            filepath: Path to JSON file
-        """
-        with open(filepath, 'r') as f:
-            state_data = json.load(f)
-
-        self.belief = np.array(state_data['belief'])
-        self.state_history = state_data.get('state_history', [])
-        self.belief_history = [np.array(b) for b in state_data.get('belief_history', [])]
-        self.t_score_history = state_data.get('t_score_history', [])
-
-        # Optionally update transition matrix and emission params
-        if 'transition_matrix' in state_data:
-            self.A = np.array(state_data['transition_matrix'])
-
-        if 'emission_params' in state_data:
+        """Load HMM state from JSON"""
+        with open(filepath) as f:
+            data = json.load(f)
+        
+        self.belief = np.array(data['belief'])
+        self.state_history = data.get('state_history', [])
+        self.belief_history = [np.array(b) for b in data.get('belief_history', [])]
+        self.t_score_history = data.get('t_score_history', [])
+        
+        if 'transition_matrix' in data:
+            self.A = np.array(data['transition_matrix'])
+        if 'emission_params' in data:
             self.emission_params = [
-                (p['mu'], p['sigma'])
-                for p in state_data['emission_params']
+                (p['mu'], p['sigma']) for p in data['emission_params']
             ]
-
-        print(f"Loaded HMM state from {filepath}")
-
-    def adapt_transition_matrix(self, transition_history: List[str],
-                                t_history: List[float]):
-        """
-        Adapt transition matrix to prevent oscillation or stagnation
-
-        Args:
-            transition_history: Recent state history
-            t_history: Recent T-score history
-        """
-        if len(transition_history) < 100:
-            return  # Need enough history
-
-        # Count transitions in recent window
-        transitions = 0
-        for i in range(1, min(100, len(transition_history))):
-            if transition_history[-i] != transition_history[-i-1]:
-                transitions += 1
-
-        # Detect oscillation (too many transitions)
-        if transitions > 30:
-            print(f"Detected oscillation ({transitions} transitions). Increasing self-transitions.")
-            # Increase diagonal (self-transitions)
-            for i in range(self.n_states):
-                self.A[i, i] *= 1.1
-            # Renormalize
-            self.A = self.A / self.A.sum(axis=1, keepdims=True)
-
-        # Detect stagnation (stuck in one state despite varying T-scores)
-        if len(set(transition_history[-500:])) == 1 and len(t_history) >= 100:
-            t_std = np.std(t_history[-100:])
-            if t_std > 0.15:
-                print(f"Detected stagnation (T-score std={t_std:.3f}). Decreasing self-transitions.")
-                # Decrease diagonal
-                for i in range(self.n_states):
-                    self.A[i, i] *= 0.9
-                # Renormalize
-                self.A = self.A / self.A.sum(axis=1, keepdims=True)
-
-    def update_emissions(self, state_history: List[str],
-                        t_score_history: List[float],
-                        alpha: float = 0.2):
-        """
-        Update emission parameters using exponential smoothing (Baum-Welch lite)
-
-        Args:
-            state_history: History of states
-            t_score_history: History of T-scores
-            alpha: Smoothing factor (0 = no update, 1 = full replacement)
-        """
-        if len(state_history) < 50:
-            return  # Need enough data
-
-        for state_idx, state_name in enumerate(self.state_names):
-            # Get T-scores for this state
-            state_t_scores = [
-                t for s, t in zip(state_history, t_score_history)
-                if s == state_name
-            ]
-
-            if len(state_t_scores) >= 20:  # Need sufficient samples
-                mu_obs = np.mean(state_t_scores)
-                sigma_obs = np.std(state_t_scores)
-
-                mu_old, sigma_old = self.emission_params[state_idx]
-
-                # Exponential smoothing
-                mu_new = (1 - alpha) * mu_old + alpha * mu_obs
-                sigma_new = (1 - alpha) * sigma_old + alpha * sigma_obs
-
-                self.emission_params[state_idx] = (mu_new, sigma_new)
-
-                print(f"Updated {state_name} emissions: μ={mu_old:.3f}→{mu_new:.3f}, "
-                      f"σ={sigma_old:.3f}→{sigma_new:.3f}")
-
-    def get_state_distribution(self) -> Dict[str, float]:
-        """
-        Get distribution of time spent in each state
-
-        Returns:
-            Dictionary of {state: percentage}
-        """
-        if not self.state_history:
-            return {s: 0.0 for s in self.state_names}
-
-        from collections import Counter
-        counts = Counter(self.state_history)
-        total = len(self.state_history)
-
-        return {s: counts.get(s, 0) / total for s in self.state_names}
-
-    def get_transition_frequency(self, window: int = 100) -> float:
-        """
-        Get transition frequency (transitions per 100 episodes)
-
-        Args:
-            window: Window size
-
-        Returns:
-            Number of transitions in window
-        """
-        if len(self.state_history) < 2:
-            return 0.0
-
-        recent = self.state_history[-window:]
-        transitions = sum(1 for i in range(1, len(recent))
-                         if recent[i] != recent[i-1])
-
-        return transitions
-
+    
     def __repr__(self) -> str:
-        """String representation"""
         state = self.get_current_state()
         belief_str = ", ".join([f"{p:.3f}" for p in self.belief])
         return f"HMM_DDA(state={state}, belief=[{belief_str}])"
 
 
-def test_hmm_controller(config_path: str):
-    """
-    Test the HMM controller
-
-    Args:
-        config_path: Path to config directory
-    """
+def test_hmm():
+    """Test HMM controller"""
     print("Testing HMM Controller...")
-
-    # Create HMM
-    hmm = HMM_DDA(config_path)
-
-    print(f"\nInitial state: {hmm.get_current_state()}")
-    print(f"Initial belief: {hmm.get_belief()}")
-
-    # Simulate T-score observations
-    t_scores = [0.3, 0.4, 0.5, 0.6, 0.7, 0.65, 0.7, 0.75, 0.8, 0.7]
-
-    print("\nSimulating T-score observations:")
+    
+    hmm = HMM_DDA()
+    print(f"Initial: {hmm}")
+    print(f"Prompt: {hmm.get_prompt()}")
+    
+    t_scores = [0.3, 0.35, 0.4, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8]
+    
+    print("\nSimulating player progression:")
     for i, t in enumerate(t_scores):
-        new_state = hmm.update(t)
+        state = hmm.update(t)
         belief = hmm.get_belief()
-        print(f"  Step {i+1}: T={t:.2f} → State={new_state}, "
-              f"Belief=[{belief[0]:.3f}, {belief[1]:.3f}, {belief[2]:.3f}]")
-
+        print(f"  T={t:.2f} → {state:12s} belief=[{belief[0]:.2f}, {belief[1]:.2f}, {belief[2]:.2f}]")
+    
     print(f"\nState distribution: {hmm.get_state_distribution()}")
-    print(f"Transition frequency: {hmm.get_transition_frequency()}")
-
-    print("\nHMM Controller test complete")
+    print(f"Transition frequency: {hmm.get_transition_frequency():.1f}")
 
 
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1:
-        test_hmm_controller(sys.argv[1])
-    else:
-        print("Usage: python hmm_controller.py <config_path>")
+    test_hmm()
