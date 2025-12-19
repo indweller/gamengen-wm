@@ -1,0 +1,26 @@
+# DeepRTS GameNGen Requirements
+# Core dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+Pillow>=9.0.0
+tqdm>=4.65.0
+
+# For diffusion model (optional - has fallback)
+diffusers>=0.21.0
+transformers>=4.30.0
+accelerate>=0.20.0
+
+# For dataset handling
+pyarrow>=12.0.0
+pandas>=2.0.0
+
+# For visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# DeepRTS (install separately)
+# pip install git+https://github.com/cair/deep-rts.git
+
+# For HuggingFace upload (optional)
+huggingface_hub>=0.16.0
