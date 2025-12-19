@@ -36,7 +36,6 @@ class Logger:
         self.log_file = self.log_dir / f"{experiment_name}.jsonl"
         self.metrics_file = self.log_dir / f"{experiment_name}_metrics.csv"
 
-        # Initialize metrics DataFrame
         self.metrics_buffer = []
 
     def log(self, data: Dict[str, Any], print_console: bool = True):
@@ -47,14 +46,11 @@ class Logger:
             data: Dictionary of data to log
             print_console: Whether to print to console
         """
-        # Add timestamp
         data['timestamp'] = datetime.now().isoformat()
 
-        # Write to JSONL file
         with open(self.log_file, 'a') as f:
             f.write(json.dumps(data) + '\n')
 
-        # Add to metrics buffer if it contains episode data
         if 'episode' in data:
             self.metrics_buffer.append(data)
 
@@ -187,7 +183,6 @@ def plot_learning_curve(episodes: List[int], rewards: List[float],
     """
     fig, ax = plt.subplots(figsize=(12, 6))
 
-    # Plot raw rewards
     if states is not None:
         state_colors = {'Low': 'green', 'Transition': 'orange', 'High': 'red'}
         for state_name in ['Low', 'Transition', 'High']:
@@ -200,7 +195,6 @@ def plot_learning_curve(episodes: List[int], rewards: List[float],
     else:
         ax.scatter(episodes, rewards, alpha=0.3, s=20, label='Raw Rewards')
 
-    # Plot moving average
     if len(rewards) >= window:
         rewards_smooth = pd.Series(rewards).rolling(window=window, center=True).mean()
         ax.plot(episodes, rewards_smooth, 'k-', linewidth=2, label=f'MA({window})')
@@ -278,12 +272,10 @@ def plot_t_score_distributions(calibration_scores: Dict[str, List[float]],
     colors = ['green', 'orange', 'red']
 
     for ax, state, color in zip(axes, states, colors):
-        # Plot calibration distribution
         if state in calibration_scores:
             ax.hist(calibration_scores[state], bins=30, alpha=0.5,
                    color=color, label='Calibration', density=True)
 
-        # Plot training distribution if provided
         if training_scores and state in training_scores:
             ax.hist(training_scores[state], bins=30, alpha=0.5,
                    color='blue', label='Training', density=True)
@@ -317,10 +309,8 @@ def plot_state_transition_diagram(transition_counts: np.ndarray,
 
     states = ['Low', 'Transition', 'High']
 
-    # Normalize to get probabilities
     transition_probs = transition_counts / (transition_counts.sum(axis=1, keepdims=True) + 1e-8)
 
-    # Create heatmap
     sns.heatmap(transition_probs, annot=True, fmt='.3f', cmap='YlOrRd',
                 xticklabels=states, yticklabels=states,
                 vmin=0, vmax=1, ax=ax, cbar_kws={'label': 'Probability'})
@@ -463,4 +453,4 @@ def create_directories(base_dir: str):
     ]
 
     for d in dirs:
-        Path(base_dir) / d).mkdir(parents=True, exist_ok=True)
+        (Path(base_dir) / d).mkdir(parents=True, exist_ok=True)
