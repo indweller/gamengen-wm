@@ -1,6 +1,6 @@
 # DeepRTS GameNGen: Testing Diffusion Models for Strategic Reasoning
 
-This project adapts the GameNGen approach (originally for DOOM) to the DeepRTS real-time strategy game. The goal is to test whether diffusion models can capture **strategic reasoning** or if they're just creating visually plausible frames.
+This environment adapts the GameNGen approach (originally for DOOM) to the DeepRTS real-time strategy game. The goal is to test whether diffusion models can capture **strategic reasoning** or if they're just creating visually plausible frames.
 
 ## Why DeepRTS?
 
