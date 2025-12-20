@@ -26,7 +26,6 @@ class RewardModel(torch.nn.Module):
         self.backbone.eval()
         self.reg_head.eval()
         self.cls_head.eval()
-        print("Latent size (input):", in_dim // (4 * (HEIGHT // 8) * (WIDTH // 8)))
 
     def forward(self, latent_stack: torch.Tensor):
         latent_stack = latent_stack.flatten(start_dim=1)

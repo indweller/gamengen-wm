@@ -138,7 +138,7 @@ def run_full_evaluation(generated: np.ndarray, original: np.ndarray):
     }
     return all_results
 
-def visualize_results(original, generated, results):
+def visualize_results(original, generated):
     sns.set_theme(style="whitegrid")
 
     plt.figure(figsize=(10, 5))
@@ -220,4 +220,4 @@ if __name__ == "__main__":
 
     results = run_full_evaluation(generated, original)
 
-    visualize_results(original, generated, results)
+    visualize_results(original, generated)

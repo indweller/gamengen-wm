@@ -373,6 +373,7 @@ if __name__ == "__main__":
     parser.add_argument("--frame_skip", type=int, default=DEFAULT_CONFIG["env"]["frame_skip"])
     
     parser.add_argument("--epsilon", type=float, default=DEFAULT_CONFIG["adversary"]["epsilon"])
+    parser.add_argument("--alpha", type=float, default=DEFAULT_CONFIG["adversary"]["alpha"])
     parser.add_argument("--adv_steps", type=int, default=DEFAULT_CONFIG["adversary"]["steps"])
 
     parser.add_argument("--total_timesteps", type=int, default=DEFAULT_CONFIG["train"]["total_timesteps"])
@@ -387,6 +388,7 @@ if __name__ == "__main__":
     CONFIG["env"]["dataset_path"] = args.dataset_path
     CONFIG["env"]["frame_skip"] = args.frame_skip
     CONFIG["adversary"]["epsilon"] = args.epsilon
+    CONFIG["adversary"]["alpha"] = args.alpha
     CONFIG["adversary"]["steps"] = args.adv_steps
     CONFIG["train"]["total_timesteps"] = args.total_timesteps
     CONFIG["use_history_cfg"] = not args.no_cfg
@@ -435,7 +437,7 @@ if __name__ == "__main__":
     
     eval_obs = train_env.reset()
     frames = []
-    for i in range(100):
+    for i in range(25):
         action = train_env.action_space.sample()
         print("Action:", COMPLEX_ACTIONS[action])
         eval_obs, reward, done, info = train_env.step([action])
@@ -444,7 +446,7 @@ if __name__ == "__main__":
         if i == 0:
            frames.extend([frame[:, :, :3], frame[:, :, 3:6], frame[:, :, 6:9]])
         frames.append(frame[:, :, 9:12])
-    imageio.mimwrite("logs/rollouts/rollout.gif", frames, fps=10)    
+    imageio.mimwrite(f"logs/rollouts/rollout_a{adversary.alpha}_s{adversary.num_steps}_e{adversary.epsilon}.gif", frames, fps=10)    
 
     # Eval env uses same config but could be tweaked if needed
     eval_env = build_vec_env(CONFIG, frozen_models, dataset, adversary, device)
