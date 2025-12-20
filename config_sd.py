@@ -21,10 +21,10 @@ NUM_BUCKETS = 10
 PRETRAINED_MODEL_NAME_OR_PATH = "CompVis/stable-diffusion-v1-4"
 
 # Repo name for dumping model artifacts
-REPO_NAME = "arnaudstiegler/sd-model-gameNgen"
+REPO_NAME = "Flaaaande/mario-sd"
 
 # When not using frame conditioning, we use this prompt
-VALIDATION_PROMPT = "video game doom image, high quality, 4k, high resolution"
+VALIDATION_PROMPT = "Super Mario Bros. playing a level"
 
 # Datasets
 # TRAINING_DATASET_DICT = {

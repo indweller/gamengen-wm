@@ -24,8 +24,25 @@ The two requirements are not compatible and require two separate virtual environ
 
 - **PPO Agent**: `python train_ppo_mario.py` (default config solves level 1-1)
 - **Dataset Generation**: `python generate_dataset.py --episodes <no_episodes> --output <gif/parquet> --upload --hf_repo <repo_name>`
-- **Finetuning VAE**:
-- **Diffusion Model**: `python train_text_to_image.py`
+- **Finetuning VAE**: `python finetune_autoencoder.py --hf_model_folder <repo_name>`
+    
+    Before running the Diffusion train code, make sure to change the <REPO_NAME> inside config_sd.py
+- **Diffusion Model**: 
+```
+    python train_text_to_image.py \
+    --dataset_name Flaaaande/mario-png-actions \
+    --gradient_checkpointing \
+    --learning_rate 5e-5 \
+    --train_batch_size 12 \
+    --dataloader_num_workers 18 \
+    --num_train_epochs 3 \
+    --validation_steps 1000 \
+    --use_cfg \
+    --output_dir sd-model-finetuned \
+    --push_to_hub \
+    --lr_scheduler cosine \
+    --report_to wandb
+```
 - **Diffusion RL environement with Adversarial Initialization**: `python train_adversarial.py --model_folder Flaaaande/mario-sd`
     - Loads trained diffusion model, VAE and reward models from HuggingFace
     - use `--adv_steps 0` for unperturbed environment
@@ -33,7 +50,7 @@ The two requirements are not compatible and require two separate virtual environ
 ### Evaluation & Inference
 
 - **Evaluation metrics (diffusion)**: `python run_evaluation.py`
-- **Run Inference (1 step game simulation)**: `python run_inference.py`
+- **Run Inference (1 step game simulation)**: `python run_inference.py --model_folder ./sd-model-finetuned`
 - **Autoregressive game simulation**: `python adversarial_dist_eval.py`
 
 ### Notes
