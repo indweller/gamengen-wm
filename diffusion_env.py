@@ -109,7 +109,13 @@ class DiffusionEnv(gym.Env):
 
         z_real = z_real.unsqueeze(0) # Add batch dim
         z_tension = self.adversary.get_adversarial_state(z_real)
-        # self.save_gif(z_tension.squeeze(0), decode=True, filepath=f"logs/rollouts/adversarial_decode.gif")
+        # save img
+        # Image.fromarray(self._process_latents(img_real.squeeze(0), is_decode=False)[0]).save(f"logs/rollouts/clean_original_f{0}_a{self.adversary.alpha}_s{self.adversary.num_steps}_e{self.adversary.epsilon}.png")
+        # img = self._process_latents(z_real.squeeze(0), is_decode=True)
+        # Image.fromarray(img[0]).save(f"logs/rollouts/clean_decode_f{0}_a{self.adversary.alpha}_s{self.adversary.num_steps}_e{self.adversary.epsilon}.png")
+        # img = self._process_latents(z_tension.squeeze(0), is_decode=True)
+        # Image.fromarray(img[0]).save(f"logs/rollouts/adversarial_decode_f{0}_a{self.adversary.alpha}_s{self.adversary.num_steps}_e{self.adversary.epsilon}.png")
+        # self.save_gif(self._process_latents(z_tension.squeeze(0), is_decode=True), filepath=f"logs/rollouts/adversarial_decode_a{self.adversary.alpha}_s{self.adversary.num_steps}_e{self.adversary.epsilon}.gif")
         return z_tension, action_real
 
     def save_gif(self, frames, filepath="output.gif"):
