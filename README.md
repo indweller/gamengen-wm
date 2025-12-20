@@ -1,4 +1,4 @@
-# HMM-DDA: Hidden Markov Model-based Dynamic Difficulty Adjustment
+# Hidden Markov Model-based Dynamic Difficulty Adjustment
 
 A framework for adaptive difficulty in procedurally generated Super Mario levels using Hidden Markov Models and reinforcement learning.
 
